@@ -22,7 +22,7 @@ mvn test -Dtest=CodeSearchGoldenSetTest -DskipTests=false
 mvn test -DskipTests=false
 ```
 
-## 演进历程
+## 开发历程
 
 ### 第一期：ReAct Agent CLI
 
@@ -257,11 +257,11 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 当前启动输出以命令行实际产物为准：
 
 ```text
-   ████████    AsterCLI π  v16.1.0
-     ██  ██    Model step-3.5-flash-2603 (step)
-     ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
-     ██  ██    ReAct · Plan · MCP · Browser · Image
-     ██  ██
+      █████       AsterCLI π  v16.1.0               1% (8.7k/1.0M)  ~/IdeaProjects/myCLI/astercli
+     ███████      Model deepseek-v4-flash (deepseek)
+    ██     ██     MCP 1/1 · 29 tools · 1/1 skills · ReAct
+    █████████     ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG
+    ██     ██ 
 
 Tips for getting started:
 1. Type / for commands and Tab completion
@@ -692,37 +692,22 @@ I
 
 ## 运行效果
 
-### 第一期：旧版启动效果
+
+
+### 当前运行效果
 
 ```text
-╔══════════════════════════════════════════════════════════╗
-║                                                          ║
-║   ██████╗  █████╗ ██╗      ██████╗██╗     ██╗            ║
-║   ██╔══██╗██╔══██╗██║     ██╔════╝██║     ██║            ║
-║   ██████╔╝███████║██║     ██║     ██║     ██║            ║
-║   ██╔═══╝ ██╔══██║██║     ██║     ██║     ██║            ║
-║   ██║     ██║  ██║███████╗╚██████╗███████╗██║            ║
-║   ╚═╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝╚══════╝╚═╝            ║
-║                                                          ║
-║              简单的 Java Agent CLI v1.0.0                ║
-║                                                          ║
-╚══════════════════════════════════════════════════════════╝
-```
 
-### 第三期：当前运行效果
-
-```text
-   ████████    AsterCLI π  v16.1.0
-     ██  ██    Model glm-5.1 (glm)
-     ██  ██    MCP 4/4 · 61 tools · 2/2 skills · ReAct
-     ██  ██    ReAct · Plan · MCP · Browser · Image
-     ██  ██
+      █████       AsterCLI π  v16.1.0               1% (8.7k/1.0M)  ~/IdeaProjects/myCLI/astercli
+     ███████      Model deepseek-v4-flash (deepseek)
+    ██     ██     MCP 1/1 · 29 tools · 1/1 skills · ReAct
+    █████████     ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG
+    ██     ██ 
 
 Tips for getting started:
 1. Type / for commands and Tab completion
 2. Ask coding questions, edit code or run commands
 3. Attach context with @path or @image:
-
 * 你好，请列出当前目录的文件
 
 🧠 思考过程:
