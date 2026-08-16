@@ -1022,12 +1022,106 @@ public class ToolRegistry {
     }
 
     /**
-     * 获取所有工具定义（用于LLM）
+     * 获取所有工具定义（用于LLM）。
+     * 默认启用精简模式：不携带完整 JSON Schema，参数说明以文字形式并入 description，
+     * parameters 只保留 {"type":"object"} 和 required 列表，显著降低每轮请求 token。
+     * 需要回退完整 Schema 时设置 ASTERCLI_TOOL_MODE=schema 或 -Dastercli.tool.mode=schema。
      */
     public List<com.astercli.llm.LlmClient.Tool> getToolDefinitions() {
-        return tools.values().stream()
+        List<com.astercli.llm.LlmClient.Tool> definitions = tools.values().stream()
                 .map(t -> new com.astercli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
+        if (!compactToolModeEnabled()) {
+            return definitions;
+        }
+        return definitions.stream().map(ToolRegistry::compactTool).toList();
+    }
+
+    static boolean compactToolModeEnabled() {
+        String configured = System.getProperty("astercli.tool.mode");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("ASTERCLI_TOOL_MODE");
+        }
+        return configured == null || configured.isBlank()
+                || !"schema".equalsIgnoreCase(configured.trim());
+    }
+
+    /**
+     * 把完整 Schema 的工具定义压缩成精简形态：
+     * description 追加参数文字说明，parameters 只留 {"type":"object"} + required。
+     */
+    public static com.astercli.llm.LlmClient.Tool compactTool(com.astercli.llm.LlmClient.Tool tool) {
+        ObjectNode slimParameters = mapper.createObjectNode();
+        slimParameters.put("type", "object");
+        JsonNode required = tool.parameters() == null ? null : tool.parameters().path("required");
+        if (required != null && required.isArray() && !required.isEmpty()) {
+            ArrayNode slimRequired = slimParameters.putArray("required");
+            required.forEach(slimRequired::add);
+        }
+        String description = tool.description() == null ? "" : tool.description();
+        String paramSummary = buildParameterSummary(tool.parameters());
+        if (!paramSummary.isEmpty()) {
+            description = description + "\n\n参数:\n" + paramSummary.trim();
+        }
+        return new com.astercli.llm.LlmClient.Tool(tool.name(), description, slimParameters);
+    }
+
+    private static String buildParameterSummary(JsonNode schema) {
+        if (schema == null || !schema.isObject()) {
+            return "";
+        }
+        JsonNode properties = schema.path("properties");
+        if (!properties.isObject() || properties.isEmpty()) {
+            return "";
+        }
+        Set<String> requiredNames = new HashSet<>();
+        JsonNode required = schema.path("required");
+        if (required.isArray()) {
+            required.forEach(node -> requiredNames.add(node.asText()));
+        }
+        StringBuilder summary = new StringBuilder();
+        properties.fields().forEachRemaining(entry ->
+                summary.append(formatParameterLine(entry.getKey(), entry.getValue(), requiredNames)));
+        return summary.toString();
+    }
+
+    private static String formatParameterLine(String name, JsonNode property, Set<String> requiredNames) {
+        StringBuilder line = new StringBuilder("- ").append(name)
+                .append(" (").append(propertyType(property));
+        JsonNode enumNode = property.path("enum");
+        if (enumNode.isArray() && !enumNode.isEmpty()) {
+            List<String> values = new ArrayList<>();
+            enumNode.forEach(value -> values.add(value.asText()));
+            line.append(", enum: ").append(String.join(" | ", values));
+        }
+        if ("object".equals(property.path("type").asText(""))) {
+            List<String> fields = new ArrayList<>();
+            JsonNode subProperties = property.path("properties");
+            if (subProperties.isObject()) {
+                subProperties.fieldNames().forEachRemaining(fields::add);
+            }
+            if (!fields.isEmpty()) {
+                line.append(", fields: ").append(String.join(", ", fields));
+            }
+        }
+        line.append(", ").append(requiredNames.contains(name) ? "required" : "optional").append(")");
+        String description = property.path("description").asText("");
+        if (!description.isBlank()) {
+            line.append(": ").append(description.trim());
+        }
+        return line.append("\n").toString();
+    }
+
+    private static String propertyType(JsonNode property) {
+        String type = property.path("type").asText("");
+        if (type.isEmpty()) {
+            return "any";
+        }
+        if ("array".equals(type)) {
+            String itemType = property.path("items").path("type").asText("");
+            return itemType.isEmpty() ? "array" : "array<" + itemType + ">";
+        }
+        return type;
     }
 
     /**

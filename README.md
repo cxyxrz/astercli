@@ -28,6 +28,7 @@ mvn test -DskipTests=false
 
 - 单轮对话驱动的 `ReAct` 循环
 - 支持工具调用：读文件、写文件、列目录、文件 glob、代码 grep、执行命令、创建项目、RAG 语义辅助检索、联网搜索、MCP 动态工具
+- 工具定义默认以精简形态发送：`tools` 数组不带完整 JSON Schema，参数说明并入描述文本，降低每轮请求 token；`ASTERCLI_TOOL_MODE=schema` 可回退完整 Schema
 - 更适合简单任务或单步操作
 
 ### 第二期：Plan-and-Execute + DAG
