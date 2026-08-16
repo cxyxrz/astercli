@@ -67,6 +67,7 @@ public class ToolRegistry {
     private static final int MAX_GREP_CONTEXT_LINES = 5;
     private static final int DEFAULT_GREP_MAX_CHARS = 24_000;
     private static final int MAX_GREP_MAX_CHARS = 60_000;
+    private static final int DEFAULT_TOOL_OUTPUT_MAX_CHARS = 64_000;
     private static final int DEFAULT_GREP_HEAD_LIMIT = 20;
     private static final String STEP_SEARCH_SERVER = "step_search";
     private static final String STEP_SEARCH_TOOL = "mcp__" + STEP_SEARCH_SERVER + "__web_search";
@@ -1202,6 +1203,45 @@ public class ToolRegistry {
         return doExecuteTool(name, argumentsJson);
     }
 
+    /**
+     * 统一工具输出预算：任何工具（尤其 MCP 工具）返回的文本超过上限时截断并追加提示，
+     * 防止单次工具结果把 conversationHistory 撑爆。imageParts 不受影响。
+     * 默认 64k 字符，可通过 ASTERCLI_TOOL_OUTPUT_MAX_CHARS 或
+     * -Dastercli.tool.output.max.chars 调整；各工具自身的细粒度预算（read_file 行数、
+     * grep max_chars 等）优先生效，本上限只做最后兜底。
+     */
+    static int toolOutputMaxChars() {
+        String configured = System.getProperty("astercli.tool.output.max.chars");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("ASTERCLI_TOOL_OUTPUT_MAX_CHARS");
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_TOOL_OUTPUT_MAX_CHARS;
+        }
+        try {
+            int value = Integer.parseInt(configured.trim());
+            return value > 0 ? value : DEFAULT_TOOL_OUTPUT_MAX_CHARS;
+        } catch (NumberFormatException ignored) {
+            return DEFAULT_TOOL_OUTPUT_MAX_CHARS;
+        }
+    }
+
+    private static ToolOutput capToolOutput(ToolOutput output) {
+        if (output == null || output.text() == null) {
+            return output;
+        }
+        String text = output.text();
+        int maxChars = toolOutputMaxChars();
+        if (text.length() <= maxChars) {
+            return output;
+        }
+        String truncated = text.substring(0, maxChars)
+                + "\n\n...(输出超长已截断：原文 " + text.length() + " 字符，仅保留前 " + maxChars
+                + "。请缩小范围后重试：read_file 用 offset/limit 分段读取，grep_code 调小 max_chars/head_limit，"
+                + "web_fetch 调小 max_chars，MCP 工具请增加过滤/分页参数)";
+        return new ToolOutput(truncated, output.imageParts());
+    }
+
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
         if (CancellationContext.isCancelled()) {
             return ToolOutput.text("用户取消了此次工具调用");
@@ -1233,7 +1273,7 @@ public class ToolRegistry {
                 if (shouldAudit) {
                     auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
                 }
-                return output;
+                return capToolOutput(output);
             }
 
             JsonNode args = mapper.readTree(argumentsJson);
@@ -1244,7 +1284,7 @@ public class ToolRegistry {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text(result);
+            return capToolOutput(ToolOutput.text(result));
         } catch (PolicyException e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.denyByPolicy(

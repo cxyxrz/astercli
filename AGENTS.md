@@ -54,6 +54,8 @@ mvn test -DskipTests=false                  # 全量回归
 
 工具定义默认以精简形态发给 LLM（`ToolRegistry.getToolDefinitions()`）：`tools` 数组不携带完整 JSON Schema，参数说明以文字并入 description，`parameters` 只留 `{"type":"object"}` + required；`ASTERCLI_TOOL_MODE=schema` 或 `-Dastercli.tool.mode=schema` 回退完整 Schema。ReAct / Plan / Multi-Agent 三条路径共用该出口。
 
+统一工具输出预算：任何工具结果文本超过 64k 字符（含 MCP 工具）会在 `doExecuteTool` 出口截断并追加"缩小范围"提示，imageParts 不受影响；`ASTERCLI_TOOL_OUTPUT_MAX_CHARS` / `-Dastercli.tool.output.max.chars` 可调。各工具自身细粒度预算（`read_file` 行数、`grep_code` max_chars/head_limit、`web_fetch` max_chars、`execute_command` 8k 字符）优先生效，该上限只做最后兜底。
+
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
