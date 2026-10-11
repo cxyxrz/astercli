@@ -1,0 +1,204 @@
+"""LangGraph ReAct 主循环。
+
+对齐 Java Agent.java 的循环语义：
+- 主退出条件 = LLM 自己决定（返回 content 不再调工具）；budget 仅兜底
+- 每轮 LLM 调用前检查 budget（停滞 / token / 硬轮数），命中即 halt
+- 每轮 LLM 调用前评估历史压缩（maybeCompactHistory）：达到触发阈值时把早期
+  轮次摘要成"[已压缩的历史对话摘要]"，通过 RemoveMessage(REMOVE_ALL_MESSAGES)
+  全量替换通道重建历史
+- 工具结果按 ToolMessage 回灌继续循环
+
+渲染器（renderer）为鸭子类型接口：begin_thinking / stream_chunk / end_thinking /
+take_reasoning / tool_calls / tool_results / halt / info；由 cli 层注入实现。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+from ..config import TOOL_MODE_SLIM
+from ..llm.factory import ProviderRuntime
+from ..memory.tokens import estimate_messages_tokens
+from ..tools.registry import ToolRegistry
+from .budget import AgentBudget, ExitReason
+from .state import AgentState
+
+
+def build_react_graph(
+    runtime: ProviderRuntime,
+    registry: ToolRegistry,
+    renderer,
+    *,
+    tool_mode: Optional[str] = None,
+    compactor=None,
+    trigger_tokens: Optional[int] = None,
+):
+    """编译 ReAct 图：agent →(有 tool_calls?)→ tools → agent → ... → END。
+
+    :param compactor: ConversationHistoryCompactor；None 时关闭自动压缩
+    :param trigger_tokens: 自动压缩触发阈值（context window - 摘要/安全预留）
+    """
+    if tool_mode is None:
+        tool_mode = TOOL_MODE_SLIM
+    graph = StateGraph(AgentState)
+    graph.add_node(
+        "agent",
+        make_agent_node(
+            runtime, registry, renderer, tool_mode, compactor=compactor, trigger_tokens=trigger_tokens
+        ),
+    )
+    graph.add_node("tools", make_tools_node(registry, renderer))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+def route_after_agent(state: AgentState):
+    if state.get("halt_reason"):
+        return END
+    last = state["messages"][-1] if state.get("messages") else None
+    if isinstance(last, AIMessage) and extract_tool_calls(last):
+        return "tools"
+    return END
+
+
+def make_agent_node(
+    runtime: ProviderRuntime,
+    registry: ToolRegistry,
+    renderer,
+    tool_mode: str,
+    *,
+    compactor=None,
+    trigger_tokens: Optional[int] = None,
+):
+    async def agent_node(state: AgentState):
+        budget: AgentBudget = state["budget"]
+        exit_reason = budget.check()
+        if exit_reason is not ExitReason.WITHIN_BUDGET:
+            message = "❌ " + budget.describe_exit(exit_reason)
+            renderer.halt(message)
+            return {"halt_reason": message}
+
+        budget.begin_iteration()
+
+        # 调 LLM 前评估历史压缩（对齐 Java maybeCompactHistory）。
+        # add_messages 对同 id 消息是"替换原位置 + 抵消删除"语义，逐 id
+        # RemoveMessage 会让含同对象的重建尾段错乱；走 REMOVE_ALL_MESSAGES
+        # 全量替换通道，reducer 直接返回 right[idx+1:] = rebuilt + 本轮新消息。
+        messages = state["messages"]
+        prefix: list = []
+        if compactor is not None and trigger_tokens:
+            rebuilt = await compactor.compact_if_needed(messages, trigger_tokens)
+            if rebuilt is not None:
+                prefix = [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + rebuilt
+                messages = rebuilt
+                renderer.info(
+                    "已自动压缩历史对话: "
+                    f"{estimate_messages_tokens(state['messages'])} → "
+                    f"{estimate_messages_tokens(rebuilt)} tokens"
+                )
+
+        schemas = registry.schemas(tool_mode) if runtime.supports_tools else None
+        llm = runtime.client.bind_tools(schemas) if schemas else runtime.client
+
+        final = None
+        renderer.begin_thinking()
+        try:
+            async for chunk in llm.astream(messages):
+                if not isinstance(chunk, AIMessage):
+                    continue
+                renderer.stream_chunk(chunk)
+                if final is None:
+                    final = chunk
+                elif isinstance(final, AIMessageChunk) and isinstance(chunk, AIMessageChunk):
+                    final = final + chunk
+                else:
+                    final = chunk
+        finally:
+            renderer.end_thinking()
+
+        if final is None:
+            message = "LLM 未返回内容"
+            renderer.halt(message)
+            return {"halt_reason": message}
+
+        # reasoning 完整性兜底：以渲染端累积为准回写 additional_kwargs，
+        # 保证 DeepSeek/Kimi 的 reasoning_content 随历史回传不缺斤短两
+        full_reasoning = renderer.take_reasoning()
+        if full_reasoning and not final.additional_kwargs.get("reasoning_content"):
+            final.additional_kwargs["reasoning_content"] = full_reasoning
+
+        usage = getattr(final, "usage_metadata", None) or {}
+        details = usage.get("input_token_details") or {}
+        budget.record_tokens(
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            details.get("cached_tokens", 0),
+        )
+
+        tool_calls = extract_tool_calls(final)
+        if tool_calls:
+            renderer.tool_calls(tool_calls)
+            budget.record_tool_calls(tool_calls)
+        return {"messages": prefix + [final]}
+
+    return agent_node
+
+
+def make_tools_node(registry: ToolRegistry, renderer):
+    async def tools_node(state: AgentState):
+        last = state["messages"][-1]
+        tool_calls = extract_tool_calls(last)
+        invalid = getattr(last, "invalid_tool_calls", None) or []
+        results = await registry.execute_all(tool_calls)
+        # 参数解析失败的调用也要回灌，否则下一轮 LLM 会困惑为什么没有工具结果
+        for bad in invalid:
+            try:
+                id_ = bad.get("id") or ""
+            except AttributeError:
+                id_ = ""
+            results.append(
+                ToolMessage(
+                    content=f"工具调用参数解析失败: {bad}",
+                    tool_call_id=id_,
+                    name=str(bad.get("name", "?")) if isinstance(bad, dict) else "?",
+                )
+            )
+        renderer.tool_results(tool_calls, results)
+        return {"messages": results}
+
+    return tools_node
+
+
+def extract_tool_calls(message: AIMessage) -> list:
+    """AIMessage / AIMessageChunk 通用 tool_calls 提取（args 统一为 dict）。"""
+    calls = list(getattr(message, "tool_calls", None) or [])
+    if calls:
+        return calls
+    # 流式聚合的 AIMessageChunk：从 tool_call_chunks 兜底解析
+    chunks = getattr(message, "tool_call_chunks", None) or []
+    parsed: list = []
+    for i, chunk in enumerate(chunks):
+        args = chunk.get("args") or ""
+        if isinstance(args, str):
+            try:
+                args = json.loads(args or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": args}
+        if not isinstance(args, dict):
+            args = {"_raw": str(args)}
+        parsed.append(
+            {
+                "name": chunk.get("name") or "",
+                "args": args,
+                "id": chunk.get("id") or f"call_{i}",
+                "type": "tool_call",
+            }
+        )
+    return parsed

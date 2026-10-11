@@ -16,6 +16,7 @@
 - `ASTER.md` 是 AsterCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
 - Banner 版本：`v16.1.0`，Maven 产物：`astercli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
+- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
 
 ## 运行前提
 
@@ -39,6 +40,17 @@ mvn test -DskipTests=false                  # 全量回归
 /init                    # 生成精简项目级记忆 ASTER.md；已有文件不覆盖，/init --force 可重写
 /export                  # 导出当前 ReAct 会话为 Markdown，包含完整 system prompt
 ```
+
+Python 版（`astercli-py/` 子目录内）：
+
+```bash
+uv sync                  # 安装依赖（Python 3.10+）
+uv run astercli          # REPL（读仓库根 .env 的 API Key）
+uv run astercli 你的提问  # 一次性运行模式
+uv run pytest            # Python 版测试（232 个）
+```
+
+Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。
 
 ## 架构概览
 

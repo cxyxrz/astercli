@@ -9,6 +9,13 @@ PAI.local.md
 target/
 *.class
 
+# Python 版（astercli-py）
+astercli-py/.venv/
+astercli-py/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # IDE
 .idea/
 *.iml
