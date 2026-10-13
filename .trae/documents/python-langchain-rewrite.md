@@ -69,7 +69,7 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P1 骨架+Provider+流式 REPL** | config / providers / factory / DeepSeek 定制 / REPL + reasoning 灰字 | `uv run astercli` 流式问答成功；`uv run pytest tests/llm/`（含 DeepSeek reasoning 回传 mock 单测） |
 | **P2 工具+ReAct+Guard** | 6 文件工具 + execute_command + LangGraph ReAct + Path/CommandGuard + 64k 预算 | REPL 内让 Agent 读改本项目文件并 grep；路径逃逸被拒；`uv run pytest tests/tools/ tests/policy/` |
 | **P3 Memory（已交付）** | conversationHistory 压缩（window-20k-13k 阈值，REMOVE_ALL_MESSAGES 全量替换通道）+ `/compact` + 长期记忆（`/save` + `/memory`，user message 前置注入） | 长对话自动压缩；`/save` 重启后可检索；`uv run pytest` 232 全绿 |
-| P4 HITL + Plan | interrupt 审批 + Plan-Execute + DAG 审阅 | `write_file` 触发审批；`/plan` 出 DAG 可 y/n/i |
+| **P4 HITL + Plan（已交付）** | 路线 B 定稿：自定义 StateGraph + `interrupt()` 审批（y/a/n/s/m 决策制，替换行内 y/n）+ Plan-Execute（`/plan` 出 DAG、审阅 Enter/Ctrl+O/ESC/I、失败<0.5 重规划） | `write_file` 触发审批框（approve/reject/approve_all 均验证）；`/plan` 出 DAG 摘要并可审阅；`uv run pytest` 308 全绿 |
 | P5 MCP | 官方 SDK + 白名单 + resources mention | 配一个真实 MCP server 并成功调用 |
 | P6 RAG | sqlite-vec + embedding + tree-sitter 索引 + 混合检索 | `/index` 后语义查询命中 |
 | P7 Multi-Agent / Skill / web 工具 | orchestrator / skill buffer / web_search+web_fetch | `/team`、`/skill` 可用 |
@@ -108,3 +108,35 @@ uv run astercli                            # REPL：选 deepseek 或 glm（用�
 #   预期：Agent 走 LangGraph ReAct，多轮工具调用，路径逃逸（如 ../../etc）被 PathGuard 拒绝
 uv run astercli <<< "读 /etc/hosts 并写入 /tmp/x"   # 验证写入审批边界与 Guard 拦截
 ```
+
+## P4 开工前选型：create_agent + 中间件栈 vs 保持自定义 StateGraph
+
+P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装），`langchain.agents.middleware` 全套可用：`AgentMiddleware`（`before_model` / `after_model` / `wrap_model_call` / `wrap_tool_call` / `modify_state`）+ 内置 `SummarizationMiddleware` / `HumanInTheLoopMiddleware` / `ModelCallLimitMiddleware` / `ToolRetryMiddleware`。P2 "prebuilt 封死钩子"的选型理由在 langchain 1.x 已大幅失效，P4 开工第一件事是评估两条路线：
+
+- **路线 A：迁 `langchain.agents.create_agent` + 中间件栈**。一次拿到三个收益：`HumanInTheLoopMiddleware`（P4 审批）、`SummarizationMiddleware`（替代 P3 compactor）、LangGraph Store + 自定义注入 middleware（替代 run_turn 记忆注入）。`SummarizationMiddleware` 构造支持 `token_counter` / `trigger=('tokens', N)` / `summary_prompt` 自定义；但 `keep` 只支持 fraction/tokens/messages，没有"user 轮次"边界，tool 对不被切断需验证。代价：reasoning 流式聚合、停滞检测、xfyun 纯对话、slim schema 出口全部重新对接
+- **路线 B：保持自定义 StateGraph**。P4 只实现 `interrupt()` 审批 + Plan-Execute；memory 留 P3 形态；P6 时只把 LongTermMemory 存储层换 LangGraph Store（Store 不要求 create_agent）
+- **估算器结论（两路线通用）**：`count_tokens_approximately` 不能直接替换自研估算——中文低估 ~2×（全局 chars_per_token=4 无分脚本能力，实测中文句 20 vs 11），且完全不计 `reasoning_content`（实测 153 vs 7）。无论哪条路继续用 `estimate_messages_tokens`；迁中间件时通过 `token_counter` 口子传入
+- **安全网**：232 个测试是迁移前后行为等价的验收线；若走路线 A，迁移前后跑全量必须全绿
+
+## P4 选型定稿（路线 B）与交付记录
+
+**结论：保持自定义 StateGraph（路线 B）**。spike 实测（2026-10，venv 内 langchain=1.4.3 / langgraph=1.2.12）：
+
+- `interrupt()` + `Command(resume)` 在自定义 StateGraph 上完整可用（挂起 → checkpoint → resume 值回传），HITL 审批不需要 create_agent
+- `create_agent` 对 slim dict 工具原样透传 `bind_tools`（调用期而非编译期，与直接 bind 行为一致），不构成路线 A 的加分项
+- reasoning_content 聚合在两条路线下行为等价（简单场景验证）
+- `MemorySaver.delete_thread` 存在且可用（per-turn thread 释放）
+- 路线 A 的 `SummarizationMiddleware` `keep` 只有 fraction/tokens/messages，表达不了 P3 的"保留最近 3 个 user 轮次 + HumanMessage 对齐"语义 → P3 compactor 不可替换，路线 A 收益进一步缩水
+- P6 接 LangGraph Store 不要求 create_agent，路线 B 无阻塞
+
+**P4 交付内容**：
+
+- `hitl/`（policy + approval + terminal）：审批决策制 `approve / approve_all / reject / skip / modify`；`ApprovalSession` 持会话放行名单（工具维度，`/clear` 清空）；fail-safe：非法输入 / 决策缺失 / 输入流关闭一律保守拒绝
+- `agent/graph.py`：tools 节点执行前 `interrupt()` 挂起；`ainvoke_with_hitl` 恢复循环；`make_checkpointer()`（MemorySaver + `JsonPlusSerializer(pickle_fallback=True)`——AgentBudget 等自定义类 msgpack 不识别，官方开关兜底；纯内存无持久化攻击面）；无 checkpointer 时审批整体禁用（graph 层 + `registry.set_hitl_active(False)` 双层同步）
+- `plan/`（models + planner）：两遍 JSON 解析（id 归一化 + 前向引用回填）、DFS 拓扑排序环检测、批次分层展示；`is_simple_goal` 快路径不调 LLM
+- `cli/plan_review.py`：审阅键位 Enter / Ctrl+O / ESC / I（KeyBindings eager 绑定，方向键不会误触 ESC；已展开时 ESC 折叠回摘要）
+- `agent/plan_execute.py`：拓扑序**顺序**执行（Java 4 线程并行，P4 顺序保证审批与渲染不交错，任务级并行留后续）；失败且 progress<0.5 → replan + 重新审阅；每任务独立 thread + `MAX_TASK_ITERATIONS=5` 预算
+- `cli/main.py`：`/plan [任务]` 命令 + 无参数下一轮计划模式；run_turn per-turn thread + resume 后从 `result["budget"]` 取回记账（反序列化副本）
+- 测试 232 → 308（新增 hitl/plan/graph-hitl/plan-execute/plan-review + registry 审批测试改决策制）
+
+**已知边界（后续再议）**：任务批次并行执行、`m`（modify）修改参数后 UI 回显、审批框在非 TTY stdin 下退化为 EOF 拒绝（fail-safe 符合预期）。

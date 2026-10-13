@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from rich.console import Console
 
 from .. import __version__
 from ..agent import AgentBudget
-from ..agent.graph import build_react_graph
+from ..agent.graph import ainvoke_with_hitl, build_react_graph, make_checkpointer
+from ..agent.plan_execute import PlanExecuteAgent
 from ..config import Settings
+from ..hitl import ApprovalSession, HitlPrompter
 from ..llm.factory import (
     ProviderRuntime,
     available_providers,
@@ -39,10 +41,12 @@ from ..memory import (
     memory_context_tokens,
     normalize_project_key,
 )
+from ..plan import Planner
 from ..policy import PathGuard
 from ..prompt import build_system_prompt
 from ..tools import ToolRegistry
 from ..tools.builtin import register_file_tools, register_shell_tools
+from .plan_review import review_plan
 from .renderer import ConsoleRenderer
 
 
@@ -99,17 +103,23 @@ class ReplApp:
         self.renderer = renderer
         self.root = root.resolve()
         self.path_guard = PathGuard(self.root)
-        self.registry = ToolRegistry(settings=settings, approval=_make_approval(renderer))
+        # HITL 审批：interrupt 挂起 → 终端收集决策 → Command(resume) 恢复；
+        # 会话级"全部放行"名单挂在 ApprovalSession 上（/clear 清空）
+        self.approval = ApprovalSession()
+        self.checkpointer = make_checkpointer()
+        self.hitl_prompt = HitlPrompter(getattr(renderer, "_console", None))
+        self.registry = ToolRegistry(settings=settings, approval=self.approval)
         register_file_tools(self.registry, self.path_guard)
         register_shell_tools(self.registry, self.path_guard)
         self.runtime = runtime
         self.long_term = LongTermMemory()
         self.project_key = normalize_project_key(self.root)
         self.history: list = [SystemMessage(build_system_prompt(self.root))]
+        self._next_use_plan = False
         self._rebuild_graph()
 
     def _rebuild_graph(self) -> None:
-        """按当前 runtime 重建压缩器与 ReAct 图（/model 切换后复用）。"""
+        """按当前 runtime 重建压缩器与 ReAct 图 / Plan Agent（/model 切换后复用）。"""
         self.compactor = ConversationHistoryCompactor(self.runtime.client)
         self.trigger_tokens = auto_compact_trigger_tokens(self.runtime.context_window)
         self.graph = build_react_graph(
@@ -119,7 +129,49 @@ class ReplApp:
             tool_mode=self.settings.tool_mode(),
             compactor=self.compactor,
             trigger_tokens=self.trigger_tokens,
+            approval=self.approval,
+            checkpointer=self.checkpointer,
         )
+        self.plan_agent = PlanExecuteAgent(
+            self.runtime,
+            self.registry,
+            self.renderer,
+            Planner(self.runtime, self.renderer),
+            self._review_plan,
+            tool_mode=self.settings.tool_mode(),
+            compactor=self.compactor,
+            trigger_tokens=self.trigger_tokens,
+            approval=self.approval,
+            checkpointer=self.checkpointer,
+            on_interrupt=self._on_hitl_interrupt,
+            memory_provider=self._task_memory,
+        )
+
+    # ---------- HITL 审批 / 计划审阅回调 ----------
+
+    async def _on_hitl_interrupt(self, interrupts) -> dict:
+        return await self.hitl_prompt.collect(interrupts)
+
+    async def _review_plan(self, goal, plan):
+        return await review_plan(goal, plan, getattr(self.renderer, "_console", None))
+
+    def _task_memory(self, description: str) -> str:
+        return (
+            build_memory_context(
+                self.long_term,
+                description,
+                memory_context_tokens(self.runtime.context_window),
+                project_key=self.project_key,
+            )
+            or ""
+        )
+
+    def _delete_thread(self, thread_id: str) -> None:
+        """释放单轮 thread 的 checkpoint（MemorySaver 常驻会话内增长）。"""
+        try:
+            self.checkpointer.delete_thread(thread_id)
+        except Exception:  # noqa: BLE001 —— 清理失败不影响任务结果
+            pass
 
     # ---------- 主循环 ----------
 
@@ -141,7 +193,13 @@ class ReplApp:
                     break
                 continue
             try:
-                asyncio.run(self.run_turn(stripped))
+                # /plan 无参数后下一次输入走计划模式
+                use_plan = self._next_use_plan
+                self._next_use_plan = False
+                if use_plan:
+                    asyncio.run(self.run_plan_turn(stripped))
+                else:
+                    asyncio.run(self.run_turn(stripped))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 self.renderer.warn("⏹️ 已取消当前任务。")
         return 0
@@ -150,6 +208,9 @@ class ReplApp:
 
     async def run_turn(self, text: str) -> None:
         snapshot = list(self.history)
+        # 每轮独立 thread：interrupt 挂起需要 checkpointer，轮后 delete_thread 释放
+        thread_id = uuid.uuid4().hex
+        config = {"configurable": {"thread_id": thread_id}}
         try:
             # 检索相关长期记忆，前置注入本轮 user message（不进 system prompt，
             # 保持前缀稳定以友好 prompt cache）
@@ -166,15 +227,33 @@ class ReplApp:
                 self.settings.react_stagnation_window(),
                 self.settings.react_hard_max_iterations(),
             )
-            result = await self.graph.ainvoke(
-                {"messages": list(self.history), "budget": budget, "halt_reason": None}
+            result = await ainvoke_with_hitl(
+                self.graph,
+                {"messages": list(self.history), "budget": budget, "halt_reason": None},
+                config,
+                self._on_hitl_interrupt,
             )
             self.history[:] = result["messages"]
+            # resume 恢复后 result["budget"] 是反序列化副本，优先取回（token 记账完整）
+            budget = result.get("budget") or budget
         except (KeyboardInterrupt, asyncio.CancelledError):
             # 取消当前任务：回滚本轮半途历史，不污染下一轮
             self.history[:] = snapshot
+            self._delete_thread(thread_id)
             raise
+        self._delete_thread(thread_id)
         self.renderer.usage(budget)
+
+    async def run_plan_turn(self, text: str) -> None:
+        """计划模式单轮：/plan 触发，Planner 出 DAG → 审阅 → 按序执行。"""
+        try:
+            result = await self.plan_agent.run(text)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            self.renderer.warn("⏹️ 已取消计划任务。")
+            return
+        # 计划结果只进历史不重印全文（任务过程已流式输出）
+        self.history.append(HumanMessage(text))
+        self.history.append(AIMessage(f"[计划结果] {result}"))
 
     # ---------- 斜杠命令（未知命令在 CLI 层直接报错，不回退给 Agent） ----------
 
@@ -187,9 +266,16 @@ class ReplApp:
             return True
         if cmd == "/clear":
             self.history = [SystemMessage(build_system_prompt(self.root))]
+            self.approval.clear_approved_all()
             self.renderer.info("已清空会话历史（system prompt 已重建，长期记忆保留）。")
         elif cmd == "/compact":
             self._compact_history()
+        elif cmd == "/plan":
+            if payload:
+                asyncio.run(self.run_plan_turn(payload))
+            else:
+                self._next_use_plan = True
+                self.renderer.info("计划模式已开启，下一条输入将进入任务规划与审阅。")
         elif cmd == "/model":
             self._handle_model(payload.split()[0] if payload else "")
         elif cmd == "/save":
@@ -207,7 +293,7 @@ class ReplApp:
         elif cmd == "/help":
             self.renderer.info(
                 "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · "
-                "/model [provider] 切换 · /tools 工具列表 · "
+                "/model [provider] 切换 · /tools 工具列表 · /plan [任务] 计划模式 · "
                 "/save [--global] <事实> 存长期记忆 · /memory list|search|delete|clear · /help 帮助"
             )
         else:
@@ -311,8 +397,8 @@ class ReplApp:
             style="grey50",
         )
         console.print(
-            "命令: /model 切换 · /tools 工具 · /compact 压缩 · /save 与 /memory 记忆 · "
-            "/clear 清空 · /quit 退出",
+            "命令: /model 切换 · /tools 工具 · /plan 计划模式 · /compact 压缩 · "
+            "/save 与 /memory 记忆 · /clear 清空 · /quit 退出",
             style="grey50",
         )
 
@@ -338,20 +424,6 @@ def format_memory_entries(title: str, entries: list) -> str:
         preview = e.content if len(e.content) <= 80 else e.content[:80] + "..."
         lines.append(f"  [{e.id}] ({scope}) {ts} · {preview}")
     return "\n".join(lines)
-
-
-def _make_approval(renderer):
-    async def approve(tool_def, args: dict) -> bool:
-        from rich.prompt import Confirm
-
-        preview = json.dumps(args, ensure_ascii=False)
-        if len(preview) > 160:
-            preview = preview[:160] + "…"
-        return await asyncio.to_thread(
-            Confirm.ask, f"允许执行 {tool_def.name} {preview} ?", default=False
-        )
-
-    return approve
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from typing import Optional
 from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import Command, interrupt
 
 from ..config import TOOL_MODE_SLIM
 from ..llm.factory import ProviderRuntime
@@ -27,6 +28,19 @@ from ..memory.tokens import estimate_messages_tokens
 from ..tools.registry import ToolRegistry
 from .budget import AgentBudget, ExitReason
 from .state import AgentState
+
+
+def make_checkpointer():
+    """MemorySaver + pickle 兜底序列化。
+
+    state 里的 AgentBudget 是自定义类，JsonPlusSerializer 的 msgpack 编码
+    不认识（"Type is not msgpack serializable"）→ 打开官方 pickle_fallback
+    开关兜底。MemorySaver 纯内存不落盘，pickle.loads 无持久化攻击面。
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    return MemorySaver(serde=JsonPlusSerializer(pickle_fallback=True))
 
 
 def build_react_graph(
@@ -37,14 +51,25 @@ def build_react_graph(
     tool_mode: Optional[str] = None,
     compactor=None,
     trigger_tokens: Optional[int] = None,
+    approval=None,
+    checkpointer=None,
 ):
     """编译 ReAct 图：agent →(有 tool_calls?)→ tools → agent → ... → END。
 
     :param compactor: ConversationHistoryCompactor；None 时关闭自动压缩
     :param trigger_tokens: 自动压缩触发阈值（context window - 摘要/安全预留）
+    :param approval: ApprovalSession（HITL 审批）；None 时禁用审批（对齐 Java
+        "HITL 未启用行为与父类完全相同"）。审批经 interrupt() 挂起，需要
+        checkpointer 提供 resume 能力；未提供 checkpointer 时审批自动禁用。
+    :param checkpointer: LangGraph checkpointer（如 MemorySaver）
     """
     if tool_mode is None:
         tool_mode = TOOL_MODE_SLIM
+    if approval is not None and checkpointer is None:
+        # 审批需要 checkpointer 提供 resume 能力；缺失时整体禁用（graph 层
+        # 不拦截 + registry 层直接执行），对齐 Java "HITL 未启用行为与父类相同"
+        approval = None
+        registry.set_hitl_active(False)
     graph = StateGraph(AgentState)
     graph.add_node(
         "agent",
@@ -52,11 +77,31 @@ def build_react_graph(
             runtime, registry, renderer, tool_mode, compactor=compactor, trigger_tokens=trigger_tokens
         ),
     )
-    graph.add_node("tools", make_tools_node(registry, renderer))
+    graph.add_node("tools", make_tools_node(registry, renderer, approval=approval))
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
+
+
+async def ainvoke_with_hitl(graph, state: dict, config: dict, on_interrupt=None) -> dict:
+    """ainvoke + HITL 挂起恢复循环。
+
+    图因审批 interrupt() 挂起时，把 ``__interrupt__`` 交给 on_interrupt 收集
+    用户决策，再以 ``Command(resume=...)`` 恢复，直到拿到最终状态。
+    on_interrupt 为 None 时对挂起调用保守拒绝（fail-safe）。
+    """
+    result = await graph.ainvoke(state, config)
+    while isinstance(result, dict) and result.get("__interrupt__"):
+        interrupts = result["__interrupt__"]
+        if on_interrupt is not None:
+            response = await on_interrupt(interrupts)
+        else:
+            payload = getattr(interrupts[0], "value", None) if interrupts else {}
+            calls = (payload or {}).get("calls", [])
+            response = {c.get("id", ""): {"action": "reject", "reason": "无审批处理器，保守拒绝"} for c in calls}
+        result = await graph.ainvoke(Command(resume=response), config)
+    return result
 
 
 def route_after_agent(state: AgentState):
@@ -151,12 +196,27 @@ def make_agent_node(
     return agent_node
 
 
-def make_tools_node(registry: ToolRegistry, renderer):
+def make_tools_node(registry: ToolRegistry, renderer, approval=None):
     async def tools_node(state: AgentState):
         last = state["messages"][-1]
         tool_calls = extract_tool_calls(last)
         invalid = getattr(last, "invalid_tool_calls", None) or []
-        results = await registry.execute_all(tool_calls)
+        # HITL 审批（对齐 Java HitlToolRegistry：执行前拦截，拦截顺序
+        # Hitl → Registry → Guard）：挂起重入时节点从头重跑，interrupt()
+        # 返回 resume 值，之前的执行路径无副作用
+        decisions: dict = {}
+        if approval is not None and tool_calls:
+            pending = approval.pending_calls(tool_calls, registry)
+            if pending:
+                response = interrupt(approval.build_payload(pending))
+                decisions = approval.apply_response(pending, response)
+            # 会话放行名单（approve_all）内的调用无需再挂起，但 registry 层
+            # 仍要求危险调用携带决策，这里补齐放行决策
+            for call in tool_calls:
+                call_id = call.get("id", "")
+                if call_id not in decisions and approval.is_approved_all(call.get("name")):
+                    decisions[call_id] = {"action": "approve"}
+        results = await registry.execute_all(tool_calls, decisions=decisions)
         # 参数解析失败的调用也要回灌，否则下一轮 LLM 会困惑为什么没有工具结果
         for bad in invalid:
             try:

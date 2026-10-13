@@ -9,6 +9,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from astercli.config import Settings
+from astercli.hitl import ApprovalSession
 from astercli.policy import PolicyException
 from astercli.tools.registry import (
     Param,
@@ -243,31 +244,57 @@ async def test_bad_args_json_becomes_empty_dict():
     assert results[0].content == "args={}"
 
 
-# ---------- HITL 审批 ----------
+# ---------- HITL 审批（决策制：interrupt 收集用户决策后经 decisions 传入） ----------
 
 
-async def test_approval_rejection_blocks_dangerous_tool():
-    async def deny(tool, args):
-        return False
-
-    registry = make_registry(approval=deny)
+async def test_decision_reject_blocks_dangerous_tool():
+    registry = make_registry(approval=ApprovalSession())
     register_echo(registry, dangerous=True)
-    results = await registry.execute_all([call("echo", {"path": "x"})])
-    assert results[0].content.startswith("[HITL]")
-    assert "拒绝" in results[0].content
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})],
+        decisions={"call-echo": {"action": "reject", "reason": "危险操作"}},
+    )
+    assert results[0].content == "[HITL] 操作已被拒绝：危险操作"
 
 
-async def test_approval_accept_runs_dangerous_tool():
-    async def allow(tool, args):
-        return True
-
-    registry = make_registry(approval=allow)
+async def test_decision_approve_runs_dangerous_tool():
+    registry = make_registry(approval=ApprovalSession())
     register_echo(registry, dangerous=True)
-    results = await registry.execute_all([call("echo", {"path": "x"})])
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})], decisions={"call-echo": {"action": "approve"}}
+    )
     assert results[0].content == "ok:x"
 
 
-async def test_dangerous_tool_without_hook_runs_and_audits():
+async def test_decision_skip_dangerous_tool():
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})], decisions={"call-echo": {"action": "skip"}}
+    )
+    assert results[0].content == "[HITL] 操作已被跳过"
+
+
+async def test_decision_modify_replaces_args():
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})],
+        decisions={"call-echo": {"action": "modify", "args": {"path": "modified"}}},
+    )
+    assert results[0].content == "ok:modified"
+
+
+async def test_missing_decision_rejected_when_hitl_active():
+    # fail-safe：HITL 启用但决策缺失（interrupt 丢失 / 非交互路径）→ 保守拒绝
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all([call("echo", {"path": "x"})])
+    assert results[0].content == "[HITL] 未收到审批，已按拒绝处理。"
+
+
+async def test_hitl_inactive_runs_dangerous_tool_directly():
+    # 对齐 Java "HITL 未启用行为与父类相同"：无 approval → 危险工具直接执行
     registry = make_registry()
     register_echo(registry, dangerous=True)
     results = await registry.execute_all([call("echo", {"path": "x"})])
@@ -275,16 +302,11 @@ async def test_dangerous_tool_without_hook_runs_and_audits():
 
 
 async def test_non_dangerous_tool_skips_approval():
-    called = []
-
-    async def hook(tool, args):
-        called.append(tool.name)
-        return True
-
-    registry = make_registry(approval=hook)
+    # 非危险工具不需要决策（requires_approval 为 False），缺失决策也直接执行
+    registry = make_registry(approval=ApprovalSession())
     register_echo(registry, dangerous=False)
-    await registry.execute_all([call("echo", {"path": "x"})])
-    assert called == []
+    results = await registry.execute_all([call("echo", {"path": "x"})])
+    assert results[0].content == "ok:x"
 
 
 def test_audit_written_for_dangerous_call(tmp_path):

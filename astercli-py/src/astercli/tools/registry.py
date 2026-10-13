@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Optional, Tuple, Union
 from langchain_core.messages import ToolMessage
 
 from ..config import TOOL_MODE_SCHEMA, TOOL_MODE_SLIM, Settings
+from ..hitl.policy import requires_approval
 from ..policy import PolicyException, record_audit
 
 
@@ -69,23 +70,30 @@ class ToolDef:
     dangerous: bool = False
 
 
-ApprovalHook = Callable[[ToolDef, dict], Awaitable[bool]]
-
-
 class ToolRegistry:
     def __init__(
         self,
         *,
         settings: Settings,
-        approval: Optional[ApprovalHook] = None,
+        approval: Optional[object] = None,
         max_concurrency: int = 4,
     ) -> None:
+        """审批（P4 起）：approval 为 ApprovalSession（或任意真值）表示 HITL 层
+        启用——危险工具调用必须携带 decisions（interrupt 收集的用户决策）才执行，
+        缺失时保守拒绝；approval=None 时审批层整体禁用，危险工具直接执行
+        （对齐 Java "HITL 未启用，行为与父类完全相同"）。
+        """
         self._tools: dict = {}
         self._settings = settings
-        self._approval = approval
+        self._hitl_active = approval is not None
         self._max_concurrency = max_concurrency
         self._max_output_chars = settings.tool_output_max_chars()
         self._default_timeout = settings.tool_timeout_seconds()
+
+    def set_hitl_active(self, active: bool) -> None:
+        """运行期开关 HITL 层（build_react_graph 在 checkpointer 缺失时调用：
+        审批需要 resume 能力，缺失时整体禁用，危险工具直接执行）。"""
+        self._hitl_active = bool(active)
 
     # ---------- 注册 ----------
 
@@ -127,12 +135,18 @@ class ToolRegistry:
 
     # ---------- 执行（对齐 Java executeTools：4 并发 / 保序 / 超时） ----------
 
-    async def execute_all(self, tool_calls: list) -> list:
-        """并发执行 tool_calls（[{"name","args","id"}]），返回顺序一致的 ToolMessage 列表。"""
+    async def execute_all(self, tool_calls: list, decisions: Optional[dict] = None) -> list:
+        """并发执行 tool_calls（[{"name","args","id"}]），返回顺序一致的 ToolMessage 列表。
+
+        :param decisions: ``{call_id: decision}``，decision 为审批层归一化后的
+            ``{"action": approve/reject/skip/modify, "reason"?, "args"?}``；
+            HITL 启用时危险调用缺失决策会保守拒绝。
+        """
         if not tool_calls:
             return []
         semaphore = asyncio.Semaphore(self._max_concurrency)
-        tasks = [self._run_one(c, semaphore) for c in tool_calls]
+        decisions = decisions or {}
+        tasks = [self._run_one(c, semaphore, decisions.get(c.get("id", ""))) for c in tool_calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final: list = []
         for call, res in zip(tool_calls, results):
@@ -151,7 +165,7 @@ class ToolRegistry:
                 final.append(res)
         return final
 
-    async def _run_one(self, call: dict, semaphore: asyncio.Semaphore) -> ToolMessage:
+    async def _run_one(self, call: dict, semaphore: asyncio.Semaphore, decision=None) -> ToolMessage:
         name = call.get("name", "?")
         args = call.get("args")
         if isinstance(args, str):
@@ -169,19 +183,31 @@ class ToolRegistry:
 
         try:
             content = await asyncio.wait_for(
-                self._invoke(tool, args, semaphore), timeout=self._default_timeout
+                self._invoke(tool, args, semaphore, decision), timeout=self._default_timeout
             )
         except asyncio.TimeoutError:
             content = f"工具执行超时（>{self._default_timeout}s）: {name}"
         content = truncate_output(content, self._max_output_chars)
         return ToolMessage(content=content, tool_call_id=call.get("id") or "", name=name)
 
-    async def _invoke(self, tool: ToolDef, args: dict, semaphore: asyncio.Semaphore) -> str:
+    async def _invoke(self, tool: ToolDef, args: dict, semaphore: asyncio.Semaphore, decision=None) -> str:
         async with semaphore:
-            if tool.dangerous:
-                if self._approval is not None and not await self._approval(tool, args):
-                    record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
-                    return "[HITL] 用户拒绝了本次工具调用，可询问用户或调整方案。"
+            if requires_approval(tool.name, tool):
+                if self._hitl_active:
+                    if decision is None:
+                        # fail-safe：审批层启用但决策缺失（interrupt 丢失 / 非交互路径）
+                        record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
+                        return "[HITL] 未收到审批，已按拒绝处理。"
+                    action = decision.get("action")
+                    if action == "reject":
+                        record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
+                        reason = decision.get("reason") or "用户拒绝了此操作"
+                        return f"[HITL] 操作已被拒绝：{reason}"
+                    if action == "skip":
+                        record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
+                        return "[HITL] 操作已被跳过"
+                    if action == "modify" and isinstance(decision.get("args"), dict):
+                        args = decision["args"]
                 record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=True)
             try:
                 result = tool.func(args)
