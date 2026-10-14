@@ -32,6 +32,7 @@ from ..llm.factory import (
     create_client,
     create_from_settings,
 )
+from ..mcp import McpServerManager, expand_mentions
 from ..memory import (
     ConversationHistoryCompactor,
     LongTermMemory,
@@ -86,6 +87,8 @@ def main(argv=None) -> int:
             asyncio.run(app.run_turn(one_shot))
         except (KeyboardInterrupt, asyncio.CancelledError):
             renderer.warn("⏹️ 已取消当前任务。")
+        finally:
+            app.mcp.shutdown()
         return 0
 
     return app.run()
@@ -111,6 +114,10 @@ class ReplApp:
         self.registry = ToolRegistry(settings=settings, approval=self.approval)
         register_file_tools(self.registry, self.path_guard)
         register_shell_tools(self.registry, self.path_guard)
+        # MCP（P5）：动态工具注册进同一 registry（后台续载的工具实时进 schemas()）；
+        # startup 同步最多等 8 秒，超时部分后台续载，不阻塞首屏（对齐 Java）
+        self.mcp = McpServerManager(self.registry, self.settings, root=self.root, renderer=renderer)
+        self.mcp.startup()
         self.runtime = runtime
         self.long_term = LongTermMemory()
         self.project_key = normalize_project_key(self.root)
@@ -202,11 +209,14 @@ class ReplApp:
                     asyncio.run(self.run_turn(stripped))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 self.renderer.warn("⏹️ 已取消当前任务。")
+        self.mcp.shutdown()
         return 0
 
     # ---------- 单轮执行 ----------
 
     async def run_turn(self, text: str) -> None:
+        # MCP resource mention 展开（@server:uri → <resource> 块；失败降级错误块）
+        text = expand_mentions(text, self.mcp)
         snapshot = list(self.history)
         # 每轮独立 thread：interrupt 挂起需要 checkpointer，轮后 delete_thread 释放
         thread_id = uuid.uuid4().hex
@@ -246,6 +256,7 @@ class ReplApp:
 
     async def run_plan_turn(self, text: str) -> None:
         """计划模式单轮：/plan 触发，Planner 出 DAG → 审阅 → 按序执行。"""
+        text = expand_mentions(text, self.mcp)
         try:
             result = await self.plan_agent.run(text)
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -290,10 +301,13 @@ class ReplApp:
             self.renderer.info(
                 f"工具（{self.settings.tool_mode()} 模式，* = 需审批）:\n  " + "\n  ".join(names)
             )
+        elif cmd == "/mcp":
+            self._handle_mcp(payload)
         elif cmd == "/help":
             self.renderer.info(
                 "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · "
                 "/model [provider] 切换 · /tools 工具列表 · /plan [任务] 计划模式 · "
+                "/mcp [server|resources|restart|disable|enable] MCP · "
                 "/save [--global] <事实> 存长期记忆 · /memory list|search|delete|clear · /help 帮助"
             )
         else:
@@ -382,6 +396,38 @@ class ReplApp:
         self.runtime = runtime
         self._rebuild_graph()
         self.renderer.info(f"已切换模型: {runtime.display_name}")
+
+    def _handle_mcp(self, payload: str) -> None:
+        """`/mcp` 子命令（对齐 Java：status / resources / restart / disable / enable）。"""
+        parts = payload.split()
+        if not parts or parts[0].lower() == "status":
+            self.renderer.info("\n".join(self.mcp.status_lines()))
+            return
+        sub = parts[0].lower()
+        server = parts[1] if len(parts) > 1 else ""
+        if not server:
+            self.renderer.warn(f"用法: /mcp {sub} <server>")
+        elif sub == "resources":
+            self.renderer.info(asyncio.run(self.mcp.list_resources_async(server)))
+        elif sub == "restart":
+            if self.mcp.restart(server):
+                self.renderer.info(f"🔄 MCP server '{server}' 正在重连（/mcp 查看进度）。")
+            else:
+                self.renderer.warn(f"未找到 MCP server: {server}")
+        elif sub == "disable":
+            if self.mcp.disable(server):
+                self.renderer.info(f"已禁用 MCP server '{server}'（工具已注销）。")
+            else:
+                self.renderer.warn(f"未找到 MCP server: {server}")
+        elif sub == "enable":
+            if self.mcp.enable(server):
+                self.renderer.info(f"正在启用 MCP server '{server}'（/mcp 查看进度）。")
+            else:
+                self.renderer.warn(f"未找到 MCP server: {server}")
+        else:
+            self.renderer.warn(
+                f"未知的 /mcp 子命令: {sub}（可用: status / resources / restart / disable / enable）"
+            )
 
     # ---------- Banner ----------
 

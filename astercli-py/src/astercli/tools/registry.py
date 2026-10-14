@@ -111,6 +111,10 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[ToolDef]:
         return self._tools.get(name)
 
+    def unregister(self, name: str) -> None:
+        """注销单个工具（MCP server 重连前 replace 语义用）。"""
+        self._tools.pop(name, None)
+
     def names(self) -> list:
         return list(self._tools)
 

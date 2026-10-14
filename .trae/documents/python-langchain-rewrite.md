@@ -70,7 +70,7 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P2 工具+ReAct+Guard** | 6 文件工具 + execute_command + LangGraph ReAct + Path/CommandGuard + 64k 预算 | REPL 内让 Agent 读改本项目文件并 grep；路径逃逸被拒；`uv run pytest tests/tools/ tests/policy/` |
 | **P3 Memory（已交付）** | conversationHistory 压缩（window-20k-13k 阈值，REMOVE_ALL_MESSAGES 全量替换通道）+ `/compact` + 长期记忆（`/save` + `/memory`，user message 前置注入） | 长对话自动压缩；`/save` 重启后可检索；`uv run pytest` 232 全绿 |
 | **P4 HITL + Plan（已交付）** | 路线 B 定稿：自定义 StateGraph + `interrupt()` 审批（y/a/n/s/m 决策制，替换行内 y/n）+ Plan-Execute（`/plan` 出 DAG、审阅 Enter/Ctrl+O/ESC/I、失败<0.5 重规划） | `write_file` 触发审批框（approve/reject/approve_all 均验证）；`/plan` 出 DAG 摘要并可审阅；`uv run pytest` 308 全绿 |
-| P5 MCP | 官方 SDK + 白名单 + resources mention | 配一个真实 MCP server 并成功调用 |
+| **P5 MCP（已交付）** | 官方 `mcp` SDK 2.x（ClientSessionGroup）+ stdio/sse/streamable-http 三 transport + `mcp__{server}__{tool}` 动态注册 + resources 虚拟工具 + `@server:uri` mention + HITL 审批/审计 | 项目级 mcp.json 配真实 stdio server，REPL 内 LLM 经审批调用成功（`mcp__demo__add: 8`）；`uv run pytest` 374 全绿 |
 | P6 RAG | sqlite-vec + embedding + tree-sitter 索引 + 混合检索 | `/index` 后语义查询命中 |
 | P7 Multi-Agent / Skill / web 工具 | orchestrator / skill buffer / web_search+web_fetch | `/team`、`/skill` 可用 |
 
@@ -140,3 +140,20 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 - 测试 232 → 308（新增 hitl/plan/graph-hitl/plan-execute/plan-review + registry 审批测试改决策制）
 
 **已知边界（后续再议）**：任务批次并行执行、`m`（modify）修改参数后 UI 回显、审批框在非 TTY stdin 下退化为 EOF 拒绝（fail-safe 符合预期）。
+
+## P5 交付记录
+
+**选型**：官方 `mcp` SDK 2.3.0（`uv sync` 实装）。相比计划的"三 transport 手写适配"，SDK 2.x 直接提供 `ClientSessionGroup` 多 server 会话池（连接聚合 + 退出清理 + 三 transport 参数类），对应 Java 手写的 McpServerManager transport 池——Python 版最大的"不用重写"收益点。
+
+**交付内容**：
+
+- `mcp/config.py`：`mcpServers` 顶层 key（与 Java/生态通用约定一致）；用户级 `~/.astercli-py/mcp.json` 先读、项目级 `.astercli/mcp.json` 覆盖同名（对齐 Java）；`command`/`url` 互斥必设其一，`type=sse` 走 SSE、默认 http；`${VAR}` 展开 command/args/env/url/headers，未定义变量按单 server 配置错误处理（其余 server 不受影响）
+- `mcp/runtime.py`：后台 daemon 线程常驻 event loop——MCP 会话跨 REPL 每轮 `asyncio.run()` 存活的架构基础。**anyio 任务边界坑（实测）**：`connect_to_server` 进入 stdio transport 的 anyio cancel scope，anyio 强制进出同 task；connect 走 `run_coroutine_threadsafe` 会在 shutdown aclose 时炸 `Attempted to exit cancel scope in a different task` → 生命周期调用（connect）经队列投递回常驻 `_main` 任务执行，session 级调用（call_tool/list/read）仍走独立 task 保并发
+- `mcp/manager.py`：状态机 `STARTING/READY/DISABLED/ERROR`（对齐 Java McpServerStatus）；启动同步等 `ASTERCLI_MCP_STARTUP_WAIT_SECONDS`（默认 8 秒）超时后台续载不阻塞首屏；`mcp__{server}__{tool}` 注册（dangerous=True，schema 透传 SDK 原生 inputSchema）；resources 虚拟工具 `list_resources`/`read_resource`（server 支持时）；replace 语义 restart；mention 读取 20 万字符截断 + `allowByMention` 审计；`/mcp` 子命令数据接口（status/resources/restart/disable/enable）
+- `mcp/mention.py`：`@server:uri` 正则解析（server 字母开头、uri 必须 scheme://、引号内跳过）；展开为 `<resource server uri mimeType>` 块 / 失败降级 `<resource_error>` 不中断输入（对齐 Java AtMentionExpander）
+- `cli/main.py`：`run_turn`/`run_plan_turn` 前置 mention 展开；`/mcp` 命令五子命令；退出/一次性模式 finally `mcp.shutdown()`
+- 测试 308 → 374（config 24 / mention 17 / manager 25 + **真实 stdio 子进程端到端集成 2**：HITL 审批链路 + 无审批直连）。集成测试用 SDK 自带 `MCPServer`（2.x 的 FastMCP）起真实子进程
+
+**与 Java 版的差异**：用户级配置目录 `~/.astercli-py`（与 Java `~/.astercli` 隔离，与长期记忆/审计同原则）；SDK 原生 schema 直接透传（Java 需自组装 JSON）；暂未做 step_search 自动内置（依赖 STEP_API_KEY 探测，留后续）与 server 级白名单环境变量（非交互通道 P5 未涉及，微信通道在暂不迁移清单）。
+
+**已知边界**：HTTP/SSE transport 单测未覆盖（无公网测试 server，行为由 SDK 保证，仅集成冒烟验证 stdio）；`/mcp` 无 logs 子命令（Java 有，依赖启动日志文件）。

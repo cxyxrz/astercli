@@ -1,10 +1,10 @@
-# AsterCLI Python 重写版（P1/P2/P3/P4）
+# AsterCLI Python 重写版（P1–P5）
 
 用 **LangChain + LangGraph** 重写 Java 版 AsterCLI 的核心路径，与仓库根的 Java 版并行演进：
 
 - Java 版 = 生产版本，Python 侧改动不回写 Java 代码
 - 分期路线图：仓库 `.trae/documents/python-langchain-rewrite.md`
-- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）
+- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）
 
 ## 运行
 
@@ -24,6 +24,7 @@ uv run pytest                            # 全量单测
 - `/save [内容|--global 内容]` 保存长期记忆（默认项目级作用域；`--global` 为跨项目全局）
 - `/memory status|list|search <关键词>|delete <id>|clear` 长期记忆管理
 - `/plan [任务]` 计划模式：无参数时下一条输入进入规划；带参数直接规划该任务
+- `/mcp [status|resources <server>|restart <server>|disable <server>|enable <server>]` MCP server 管理
 
 ## HITL 审批（P4）
 
@@ -63,6 +64,17 @@ uv run pytest                            # 全量单测
 - **手动压缩**：`/compact` 立即压缩，保留最近 1 个轮次
 - **长期记忆**：`/save` 存储到 `~/.astercli-py/memory/long_term_memory.json`（`ASTERCLI_MEMORY_DIR` 可覆盖），scope=project 按项目根过滤、global 全局可见；每轮任务前按关键词命中率 + 24h 时间衰减检索，以"## 相关长期记忆"段落前置注入 user message（Java 版注入 system prompt，Python 版保持 system prompt 稳定以友好 prompt cache）
 
+## MCP（P5）
+
+基于官方 `mcp` SDK 2.x（`ClientSessionGroup` 会话池），对齐 Java 版 MCP 行为：
+
+- **配置**：用户级 `~/.astercli-py/mcp.json` 先读，项目级 `<项目根>/.astercli/mcp.json` 覆盖同名 server；顶层 key `mcpServers`。每条 `command`+`args`+`env`（stdio 子进程）或 `url`+`headers`+`type=sse|http`（远端），支持 `${VAR}` 展开（查找顺序：注入 env → 系统环境变量 → 仓库根 .env → 运行目录 .env → ~/.env），未定义变量该 server 置错不影响其余
+- **动态工具**：连接后以 `mcp__{server}__{tool}` 注册进 ToolRegistry，schema 透传 SDK 原生 inputSchema；所有 MCP 工具 `dangerous=True`，经 P4 的 HITL 审批通道执行
+- **resources**：server 支持时追加 `mcp__{server}__list_resources` / `mcp__{server}__read_resource` 虚拟工具
+- **mention**：输入中 `@server:uri` 自动展开为 `<resource ...>` 块（20 万字符截断；引号内不展开；失败降级为 `<resource_error>` 不中断输入）
+- **生命周期**：启动同步最多等 `ASTERCLI_MCP_STARTUP_WAIT_SECONDS`（默认 8 秒），未完成的保持 STARTING 后台续载，`/mcp` 查看最新状态；状态机 STARTING/READY/DISABLED/ERROR；后台线程常驻 event loop（会话跨 REPL 每轮 asyncio.run 存活）
+- **审计**：mention 读取按 `allowByMention` 记审计；工具调用走统一审批审计链路
+
 ## 与 Java 版的已知差异
 
 - `grep_code` 暂为纯 Python 扫描引擎（Java 版优先 ripgrep，后续对齐）
@@ -70,4 +82,5 @@ uv run pytest                            # 全量单测
 - 长期记忆检索分词：Java 用 jieba，Python 用英文整词 + 中文 2-gram（不引 jieba 依赖）
 - 记忆注入位置：user message 前置（见上）而非 system prompt
 - Plan-Execute 任务批次顺序执行（Java 4 线程并行）；审阅键位一致（Enter/Ctrl+O/ESC/I）
-- LSP 诊断、MCP、RAG、Multi-Agent、Skill 在后续分期
+- MCP 用户级配置目录为 `~/.astercli-py`（与 Java `~/.astercli` 隔离）；step_search 自动内置未迁移；HTTP/SSE transport 由官方 SDK 保证（单测仅覆盖 stdio 集成）
+- LSP 诊断、RAG、Multi-Agent、Skill 在后续分期

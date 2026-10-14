@@ -128,6 +128,12 @@ class Settings:
     def react_hard_max_iterations(self) -> int:
         return _positive_int(self.get("ASTERCLI_REACT_HARD_MAX_ITERATIONS"), 50)
 
+    # ---------- MCP ----------
+
+    def mcp_startup_wait_seconds(self) -> int:
+        """启动期 MCP 最大同步等待（对齐 Java 默认 8 秒，超时后台续载）。"""
+        return _positive_int(self.get("ASTERCLI_MCP_STARTUP_WAIT_SECONDS"), 8)
+
 
 def _positive_int(raw: Optional[str], default: int) -> int:
     if raw is None or not raw.strip():
