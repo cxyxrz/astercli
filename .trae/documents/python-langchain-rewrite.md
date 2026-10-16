@@ -71,8 +71,8 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P3 Memory（已交付）** | conversationHistory 压缩（window-20k-13k 阈值，REMOVE_ALL_MESSAGES 全量替换通道）+ `/compact` + 长期记忆（`/save` + `/memory`，user message 前置注入） | 长对话自动压缩；`/save` 重启后可检索；`uv run pytest` 232 全绿 |
 | **P4 HITL + Plan（已交付）** | 路线 B 定稿：自定义 StateGraph + `interrupt()` 审批（y/a/n/s/m 决策制，替换行内 y/n）+ Plan-Execute（`/plan` 出 DAG、审阅 Enter/Ctrl+O/ESC/I、失败<0.5 重规划） | `write_file` 触发审批框（approve/reject/approve_all 均验证）；`/plan` 出 DAG 摘要并可审阅；`uv run pytest` 308 全绿 |
 | **P5 MCP（已交付）** | 官方 `mcp` SDK 2.x（ClientSessionGroup）+ stdio/sse/streamable-http 三 transport + `mcp__{server}__{tool}` 动态注册 + resources 虚拟工具 + `@server:uri` mention + HITL 审批/审计 | 项目级 mcp.json 配真实 stdio server，REPL 内 LLM 经审批调用成功（`mcp__demo__add: 8`）；`uv run pytest` 374 全绿 |
-| P6 RAG | sqlite-vec + embedding + tree-sitter 索引 + 混合检索 | `/index` 后语义查询命中 |
-| P7 Multi-Agent / Skill / web 工具 | orchestrator / skill buffer / web_search+web_fetch | `/team`、`/skill` 可用 |
+| **P6 RAG（已交付）** | sqlite-vec（vec0 KNN + JSON 余弦回退）+ LangChain OpenAIEmbeddings + tree-sitter 8 语言 AST 分块 + 语义/关键词混合检索；`search_code` 工具 + `/index` `/search` 命令 | 真实阿里云 embedding 对 Java 源码建索引（2302 块 / sqlite-vec 后端），三条自然语言查询全部精准命中（"压缩会话历史"→maybeCompactHistory、"审批拦截"→hitl 包、"向量检索"→rag 包）；`uv run pytest` 410 全绿 |
+| **P7 Multi-Agent / Skill / web 工具（已交付）** | `AgentOrchestrator`（planner → worker → reviewer 流水线，worker 复用 `build_react_graph` 全量继承工具/budget/HITL/reasoning 流式）+ Skill 三层目录加载 + `load_skill` + `SkillContextBuffer` 下一轮注入 + system prompt 索引段（≤20 个/4KB）+ `web_search`（zhipu/serpapi/searxng 三 provider）+ `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability） | `/team` 真实 LLM 协作跑通两步依赖链（含 reviewer 拒绝→反馈→重试→通过完整生命周期）；`/skill` 项目级 SKILL.md 加载→`load_skill`→buffer 注入全链路生效；web_search 真实 API 错误识别友好提示 + web_fetch 真实抓取 example.com 转 Markdown；`uv run pytest` 526 全绿（新增 116） |
 
 **明确暂不迁移**（后续再议）：微信 iLink 通道、LSP 诊断、Chrome DevTools/CDP、完整 TUI 视觉（底部状态栏/dock/live thinking 区）、Side-Git 快照、Runtime API、图片输入、Lanterna 降级。
 
@@ -157,3 +157,37 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 **与 Java 版的差异**：用户级配置目录 `~/.astercli-py`（与 Java `~/.astercli` 隔离，与长期记忆/审计同原则）；SDK 原生 schema 直接透传（Java 需自组装 JSON）；暂未做 step_search 自动内置（依赖 STEP_API_KEY 探测，留后续）与 server 级白名单环境变量（非交互通道 P5 未涉及，微信通道在暂不迁移清单）。
 
 **已知边界**：HTTP/SSE transport 单测未覆盖（无公网测试 server，行为由 SDK 保证，仅集成冒烟验证 stdio）；`/mcp` 无 logs 子命令（Java 有，依赖启动日志文件）。
+
+## P6 交付记录
+
+**选型与前置**：`sqlite-vec` + tree-sitter（py/java/js/ts/tsx/go/rs/c/cpp 八语言 grammar）+ `langchain_openai.OpenAIEmbeddings`（1.6.7 的 base/key 字段名为 `openai_api_base`/`openai_api_key`，与旧文档常见的 `base_url=` 不同）。**Python 构建坑（实测）**：python.org macOS 官方构建的 `sqlite3` 未启用 `enable_load_extension`，加载 sqlite-vec 必须用支持该 API 的解释器——`.python-version` 因此 pin 到 uv 管理的 python-build-standalone 3.12；VectorStore 同时保留 JSON 全量余弦回退，扩展不可用的环境自动降级（等价 Java 手写方案），测试两条路径都锁。
+
+**交付内容**：
+
+- `rag/chunker.py`：tree-sitter AST 符号分块——class 块取声明头 5 行、method 块取完整函数体（对齐 Java CodeChunker 语义）；C/C++ 函数名藏在 declarator 子树（无 name field），专用提取逻辑；无符号文件回退 file 块，超 2000 字符按行边界分段；grammar 缺失/解析异常一律文本兜底
+- `rag/embeddings.py`：`EMBEDDING_*` 配置（与 Java/.env 同名）；ollama provider 自动补 `/v1` 端点 + 占位 key，openai 兼容云服务需 base_url+key+model；单条 2000 字符截断；维度探测 `detect_dimension`；`http_client` 可注入（MockTransport 单测）
+- `rag/store.py`：**per-project 独立库** `~/.astercli-py/rag/{sha1(project)[:12]}.db`（替代 Java 单库多项目混合行）；sqlite-vec 可用时 vec0 虚拟表 KNN（float32 小端 BLOB，distance=1-cosine 换回相似度口径），否则 JSON 列 + 内存余弦；维度/模型变化（换 embedding 模型）自动整库重建；未索引时检索安全返回空
+- `rag/index.py`：全量重建式索引（对齐 Java 每次 /index 重建），收集→分块→分批嵌入（批 16）→入库，进度回调贯穿
+- `rag/retriever.py`：混合检索对齐 Java hybridSearch——语义 top_k*2 + 关键词 top_k*2（LIKE，底分 0.15）、双路命中 +0.1、method +0.15/class +0.10、单文件最多 2 条；**融合分写回 similarity**（展示值=排序依据，Java 显示原始路分）；查询分词零依赖（ASCII 整词 + 中文 2-gram，不引 jieba）；`format_for_tool`/`format_for_cli` 文案对齐 SearchResultFormatter
+- `cli/main.py`：`search_code` 工具注册（只读不审批，未索引返回 /index 提示）；`/index [路径]`（PathGuard 限项目根内）与 `/search <query>`（不经过 LLM）命令；/help 与启动提示更新
+- 测试 374 → 410（chunker 8 / store 8 / retriever 10 / index 6 / tool 4；单测全部注入确定性伪向量或 MockTransport，不发真实请求；`ASTERCLI_RAG_DIR` 可重定向库目录）
+
+**关键词底分 0.15 而非 Java 0.3（实测修正）**：live smoke 首跑发现现代 embedding 模型余弦绝对值普遍偏低（语义最相关块常在 0.2 上下），0.3 底分让纯关键词 LIKE 命中的噪音块压过真实语义命中；降为 0.15 后语义主导、关键词兜底，并有专门回归测试锁定（`test_semantic_beats_keyword_noise`）。
+
+**live smoke（真实 API）**：阿里云 `text-embedding-v4`（1024 维）对 Java 版 `src/main/java/com/astercli` 建索引——2302 块、sqlite-vec 后端；"负责压缩会话历史控制上下文长度的组件"→ `maybeCompactHistory`×3、"审批工具调用的拦截逻辑"→ `TerminalHitlHandler.promptUntilDecision` 等 hitl 包、"向量检索相关代码"→ rag 包三件套，全部语义命中且融合分合理（0.33–0.46）。
+
+**与 Java 版的差异**：符号分块从 JavaParser 单语言换 tree-sitter 八语言；查询分词 jieba→零依赖；存储 per-project 独立库（Java 单库 `codebase.db` 混多项目）；块行号入库并在结果中展示（`L323-334`）；关键词底分 0.15（见上）。
+
+## P7 交付记录
+
+**交付内容**：
+
+- `web/`：`NetworkPolicy`（scheme 白名单 + DNS 解析后环回/未指定/链路本地/内网地址拒绝 + 60s/30 次窗口限流，SSRF 围栏；内网判定用 `ipaddress.is_private` 覆盖 Java site-local 全部网段）、`WebFetcher`（5MB 流式上限 + 30s 超时 + Content-Type charset 优先）、`HtmlExtractor`（BeautifulSoup 极简 readability：噪声标签清理 → article/main 语义容器 →链接密度评分兜底 →Markdown 渲染含表格/代码块/相对链接补全）、`search.py`（zhipu/serpapi/searxng 三 provider，选择优先级 SEARCH_PROVIDER > GLM key > SERPAPI key > SEARXNG_URL 对齐 Java pickProvider）
+- `web_search` / `web_fetch` 工具（只读不审批，失败转文本回给 LLM）；已知差异：Java 在 step-3.7-flash 模型下转调 StepSearch MCP 的偏好不迁移
+- `skill/`：`Skill` 数据模型 + `frontmatter.py`（零 PyYAML 单行/多行/数组解析，嵌套对象警告降级）、`state_store.py`（`~/.astercli-py/skills.json` disabled 持久化）、`registry.py`（user `~/.astercli-py/skills` + project `.astercli/skills` 三层扫描，后者同名整体覆盖）、`buffer.py`（LRU≤3、drain 一次性消费、同 skill 重复 push 替换）、`index_formatter.py`（≤20 个/≤4KB/单条 500 字符）、`load_skill` 工具（body 5k 截断，禁用态提示 /skill on）；已知差异：Java builtin（jar 内置）层暂无 Python 内置资产
+- `agent/orchestrator.py`：`AgentOrchestrator`——planner（单轮流式出计划 JSON）→ 按依赖批次执行 worker（复用 `build_react_graph`：工具/budget 兜底/reasoning 流式/HITL 审批全量继承）→ reviewer 审查（不通过带反馈重试 ≤2 次，审查 LLM 失败兜底放行）；依赖批次内顺序执行（延续 P4 决策，避免并行 interrupt 与共享 renderer 输出交错）；`/team` 命令 + banner Skill 数展示
+- `prompt.py`：system prompt 注入 Skill 索引段 + `build_team_prompt` 三角色提示词（对齐 Java TEAM_PLANNER/WORKER/REVIEWER）；`factory.py`：`stream_chunk_timeout` 100s→300s（实测 thinking 模型 reviewer 长推理被默认值误杀）
+- `/skill` 命令：list/show/off/on/reload，off/on/reload 后同步刷新历史首条 system prompt 的索引段；`/clear` 清 skill buffer 并按当前索引段重建
+- 测试 410 → 526（web 36 / skill 42 / orchestrator 38；全部中文命名、零网络：MockTransport、getaddrinfo monkeypatch、FakeTeamModel 按角色括号词分派）
+
+**live smoke（真实 API）**：web_fetch 真实抓取 example.com 转 Markdown（标题/正文/相对链接全对）；Skill 项目级 SKILL.md 三层加载→索引段→load_skill→buffer 注入全链路生效；`/team` 真实 deepseek-v4-pro 协作跑通两步依赖链（planner 拆步骤→worker read_file→reviewer 审查 step_1 首轮拒绝并给出"未引用实际内容"反馈→重试通过→step_2 总结完成，展示完整拒绝/重试生命周期）；web_search 因根 .env 无 GLM key 且 SERPAPI key 已过期，验证了真实 401 的友好识别链路（成功路径解析由单测锁死）。

@@ -16,7 +16,7 @@
 - `ASTER.md` 是 AsterCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
 - Banner 版本：`v16.1.0`，Maven 产物：`astercli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
-- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
+- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP + P6 RAG + P7 Multi-Agent/Skill/web 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
 
 ## 运行前提
 
@@ -44,10 +44,10 @@ mvn test -DskipTests=false                  # 全量回归
 Python 版（`astercli-py/` 子目录内）：
 
 ```bash
-uv sync                  # 安装依赖（Python 3.10+）
+uv sync                  # 安装依赖（Python 3.12，.python-version 已 pin）
 uv run astercli          # REPL（读仓库根 .env 的 API Key）
 uv run astercli 你的提问  # 一次性运行模式
-uv run pytest            # Python 版测试（374 个）
+uv run pytest            # Python 版测试（526 个）
 ```
 
 Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。
@@ -55,6 +55,10 @@ Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长
 Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / Ctrl+O 展开 / ESC 取消 / I 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。
 
 Python 版 P5 起支持 MCP：基于官方 `mcp` SDK 2.x（ClientSessionGroup 会话池 + 后台线程常驻 event loop，会话跨每轮 `asyncio.run()` 存活）；配置合并用户级 `~/.astercli-py/mcp.json` 与项目级 `.astercli/mcp.json`（与 Java 隔离的用户级目录）；动态工具 `mcp__{server}__{tool}` 一律 dangerous 走 P4 审批通道；resources 虚拟工具、`@server:uri` mention 展开、`/mcp` 管理命令（status/resources/restart/disable/enable）已对齐；HTTP/SSE transport 由官方 SDK 保证（单测仅 stdio 集成）。
+
+Python 版 P6 起支持 RAG：tree-sitter 八语言 AST 符号分块（Java 版为 JavaParser）+ sqlite-vec vec0 KNN（扩展不可用自动回退 JSON 余弦，`.python-version` pin 3.12 系因 python.org 构建无 `enable_load_extension`）+ LangChain OpenAIEmbeddings（`EMBEDDING_*` 配置与 Java 同名，支持 ollama 本机与 OpenAI 兼容云服务）+ 语义/关键词混合检索（双路加分、单文件限流，策略对齐 Java hybridSearch；关键词底分实测调为 0.15 而非 Java 的 0.3）；`search_code` 只读工具 + `/index [路径]` 全量重建式索引 + `/search` 直查；每个项目独立库 `~/.astercli-py/rag/{hash}.db`，换 embedding 模型自动重建。
+
+Python 版 P7 起支持 Multi-Agent / Skill / web 工具：`/team [任务]` 三角色协作（planner 单轮出计划 JSON → worker 复用 ReAct 图全量继承工具/budget/HITL/reasoning 流式 → reviewer 审查，不通过带反馈重试 ≤2 次；依赖批次内顺序执行，与 Java Worker 池并行为已知差异）；Skill 三层目录（user `~/.astercli-py/skills` + project `.astercli/skills`，同名项目级整体覆盖；Java builtin 内置层暂无 Python 资产）+ `load_skill` 工具经 `SkillContextBuffer`（LRU≤3）下一轮前置注入 + system prompt 索引段（≤20 个/4KB）+ `/skill list|show|off|on|reload`；`web_search`（zhipu/serpapi/searxng 三 provider，`SEARCH_PROVIDER` 显式或按 Key 自动选择）与 `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability 转 Markdown）均只读不审批；step-3.7-flash 下转调 StepSearch MCP 的偏好不迁移。
 
 ## 架构概览
 

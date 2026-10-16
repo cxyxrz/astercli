@@ -52,6 +52,11 @@ class ProviderRuntime:
 # 对齐 Java 侧 LLM HTTP 超时：connect=60s / read=300s（SSE 两次 read 间隔）/ call=600s
 _LLM_TIMEOUT = httpx.Timeout(600.0, connect=60.0, read=300.0, write=60.0)
 
+# langchain-openai 的相邻 chunk 间隔计时器默认 100s；thinking 模型长推理期间
+# 可能长时间无 content chunk 被误杀（/team reviewer 实测触发过），放宽到 300s
+# 与 HTTP read timeout 对齐
+_STREAM_CHUNK_TIMEOUT = 300.0
+
 
 def create_client(provider: Optional[str], settings: Settings) -> Optional[ProviderRuntime]:
     """按 provider 名创建客户端；未配置 Key 或未知 provider 返回 None（对齐 Java 语义）。"""
@@ -64,7 +69,13 @@ def create_client(provider: Optional[str], settings: Settings) -> Optional[Provi
         return None
     model = settings.model(spec)
     base_url = settings.base_url(spec) or default_base_url(key, model)
-    common = dict(model=model, api_key=api_key, base_url=base_url, timeout=_LLM_TIMEOUT)
+    common = dict(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=_LLM_TIMEOUT,
+        stream_chunk_timeout=_STREAM_CHUNK_TIMEOUT,
+    )
 
     if key == "deepseek":
         client: Any = DeepSeekClient(**common)
