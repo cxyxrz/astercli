@@ -33,6 +33,7 @@ from ..llm.factory import (
     create_client,
     create_from_settings,
 )
+from ..lsp import LspManager
 from ..mcp import McpServerManager, expand_mentions
 from ..memory import (
     ConversationHistoryCompactor,
@@ -135,6 +136,10 @@ class ReplApp:
         register_rag_tool(self.registry, self.root)
         # Web（P7）：web_search / web_fetch（只读不审批；provider 未配置时返回配置提示）
         register_web_tools(self.registry, self.settings)
+        # LSP 诊断（P8）：write_file 出口钩子收集语法诊断，ReAct 图调 LLM 前
+        # 作为 user message 注入（ReAct / Plan / team worker 三路径共享此 registry）
+        self.lsp_manager = LspManager(self.root, self.settings)
+        self.registry.set_lsp_manager(self.lsp_manager)
         # Skill（P7）：三层目录加载 + load_skill 工具 + 注入缓冲区
         self.skill_registry = default_skill_registry(self.root)
         self.skill_buffer = SkillContextBuffer()

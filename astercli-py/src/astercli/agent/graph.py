@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
@@ -149,6 +149,18 @@ def make_agent_node(
                     f"{estimate_messages_tokens(rebuilt)} tokens"
                 )
 
+        # LSP 诊断注入（P8，对齐 Java injectPendingLspDiagnostics：每次调 LLM
+        # 前把 write_file 触发的 pending 诊断作为 user message 注入 + renderer
+        # 显示；registry 未挂 LspManager / 无 pending 时为空报告 no-op）。
+        # 注入点在历史压缩之后：注入消息永远属尾部轮次不会被压进摘要，
+        # 也不会随 rebuilt 全量替换通道重复入列（与 Java 行为等价）
+        injected: list = []
+        report = registry.flush_pending_lsp_diagnostics()
+        if not report.is_empty():
+            injected = [HumanMessage(content=report.prompt_text)]
+            messages = messages + injected
+            renderer.info(report.display_text)
+
         schemas = registry.schemas(tool_mode) if runtime.supports_tools else None
         llm = runtime.client.bind_tools(schemas) if schemas else runtime.client
 
@@ -191,7 +203,9 @@ def make_agent_node(
         if tool_calls:
             renderer.tool_calls(tool_calls)
             budget.record_tool_calls(tool_calls)
-        return {"messages": prefix + [final]}
+        # injected 是本轮 LLM 输入的一部分，同样要进 state 历史（对齐 Java
+        # conversationHistory.add(user)：诊断消息跨轮次保留）
+        return {"messages": prefix + injected + [final]}
 
     return agent_node
 

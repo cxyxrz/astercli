@@ -134,6 +134,17 @@ class Settings:
         """启动期 MCP 最大同步等待（对齐 Java 默认 8 秒，超时后台续载）。"""
         return _positive_int(self.get("ASTERCLI_MCP_STARTUP_WAIT_SECONDS"), 8)
 
+    # ---------- LSP 诊断（P8） ----------
+
+    def lsp_enabled(self) -> bool:
+        """对齐 Java enabled()：仅显式 false（忽略大小写）关闭，缺失/其他值默认开。"""
+        raw = self.get("ASTERCLI_LSP_ENABLED")
+        return (raw or "").strip().lower() != "false"
+
+    def lsp_max_diagnostics(self) -> int:
+        """注入上限（对齐 Java 默认 20；非正数回退默认）。"""
+        return _positive_int(self.get("ASTERCLI_LSP_MAX_DIAGNOSTICS"), 20)
+
 
 def _positive_int(raw: Optional[str], default: int) -> int:
     if raw is None or not raw.strip():

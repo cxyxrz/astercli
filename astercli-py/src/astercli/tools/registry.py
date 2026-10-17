@@ -20,6 +20,7 @@ from langchain_core.messages import ToolMessage
 
 from ..config import TOOL_MODE_SCHEMA, TOOL_MODE_SLIM, Settings
 from ..hitl.policy import requires_approval
+from ..lsp import EMPTY_REPORT, LspDiagnosticReport
 from ..policy import PolicyException, record_audit
 
 
@@ -89,11 +90,35 @@ class ToolRegistry:
         self._max_concurrency = max_concurrency
         self._max_output_chars = settings.tool_output_max_chars()
         self._default_timeout = settings.tool_timeout_seconds()
+        # LSP 诊断（P8）：None 表示诊断整体禁用（对齐 Java lspManager 为 null）
+        self._lsp_manager = None
 
     def set_hitl_active(self, active: bool) -> None:
         """运行期开关 HITL 层（build_react_graph 在 checkpointer 缺失时调用：
         审批需要 resume 能力，缺失时整体禁用，危险工具直接执行）。"""
         self._hitl_active = bool(active)
+
+    # ---------- LSP 诊断（对齐 Java setLspManager / flushPendingLspDiagnostics） ----------
+
+    def set_lsp_manager(self, lsp_manager) -> None:
+        """挂载 LSP 诊断管理器（None 表示诊断整体禁用）。"""
+        self._lsp_manager = lsp_manager
+
+    def run_post_edit_lsp_hook(self, display_path: str, safe_path: Path) -> None:
+        """write_file 出口的诊断钩子：诊断是 post-edit 辅助信号，
+        无 manager / 任何异常一律静默，不影响工具主结果。"""
+        if self._lsp_manager is None:
+            return
+        try:
+            self._lsp_manager.run_post_edit_lsp_hook(display_path, safe_path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def flush_pending_lsp_diagnostics(self) -> LspDiagnosticReport:
+        """取走 pending 诊断报告（无 manager 时返回空报告）。"""
+        if self._lsp_manager is None:
+            return EMPTY_REPORT
+        return self._lsp_manager.flush_pending_diagnostics()
 
     # ---------- 注册 ----------
 

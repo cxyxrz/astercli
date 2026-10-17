@@ -48,7 +48,7 @@ def register_file_tools(registry: ToolRegistry, path_guard: PathGuard) -> None:
             Param("path", "string", "文件路径", True),
             Param("content", "string", "文件内容", True),
         ),
-        _write_file(path_guard),
+        _write_file(path_guard, registry),
         dangerous=True,
     )
     registry.register(
@@ -120,7 +120,7 @@ def _read_file(path_guard: PathGuard):
 # ---------- write_file ----------
 
 
-def _write_file(path_guard: PathGuard):
+def _write_file(path_guard: PathGuard, registry: Optional[object] = None):
     def write_file(args: dict) -> str:
         content = args.get("content") or ""
         content_bytes = len(content.encode("utf-8"))
@@ -136,6 +136,10 @@ def _write_file(path_guard: PathGuard):
             if parent and not parent.exists():
                 parent.mkdir(parents=True, exist_ok=True)
             safe.write_text(content, encoding="utf-8")
+            # LSP 诊断出口钩子（P8，对齐 Java runPostEditLspHook）：
+            # 内部吞异常，失败不影响写入主结果；registry 缺省时 no-op
+            if registry is not None:
+                registry.run_post_edit_lsp_hook(args["path"], safe)
             return f"文件已写入: {args['path']}"
         except Exception as e:  # noqa: BLE001
             return f"写入文件失败: {e}"

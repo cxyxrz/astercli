@@ -73,8 +73,9 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P5 MCP（已交付）** | 官方 `mcp` SDK 2.x（ClientSessionGroup）+ stdio/sse/streamable-http 三 transport + `mcp__{server}__{tool}` 动态注册 + resources 虚拟工具 + `@server:uri` mention + HITL 审批/审计 | 项目级 mcp.json 配真实 stdio server，REPL 内 LLM 经审批调用成功（`mcp__demo__add: 8`）；`uv run pytest` 374 全绿 |
 | **P6 RAG（已交付）** | sqlite-vec（vec0 KNN + JSON 余弦回退）+ LangChain OpenAIEmbeddings + tree-sitter 8 语言 AST 分块 + 语义/关键词混合检索；`search_code` 工具 + `/index` `/search` 命令 | 真实阿里云 embedding 对 Java 源码建索引（2302 块 / sqlite-vec 后端），三条自然语言查询全部精准命中（"压缩会话历史"→maybeCompactHistory、"审批拦截"→hitl 包、"向量检索"→rag 包）；`uv run pytest` 410 全绿 |
 | **P7 Multi-Agent / Skill / web 工具（已交付）** | `AgentOrchestrator`（planner → worker → reviewer 流水线，worker 复用 `build_react_graph` 全量继承工具/budget/HITL/reasoning 流式）+ Skill 三层目录加载 + `load_skill` + `SkillContextBuffer` 下一轮注入 + system prompt 索引段（≤20 个/4KB）+ `web_search`（zhipu/serpapi/searxng 三 provider）+ `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability） | `/team` 真实 LLM 协作跑通两步依赖链（含 reviewer 拒绝→反馈→重试→通过完整生命周期）；`/skill` 项目级 SKILL.md 加载→`load_skill`→buffer 注入全链路生效；web_search 真实 API 错误识别友好提示 + web_fetch 真实抓取 example.com 转 Markdown；`uv run pytest` 526 全绿（新增 116） |
+| **P8 LSP 诊断** | 进程内解析诊断（对齐 Java Phase 17 的轻量形态，非真实 LSP server）：`.py` 用内置 ast、其余复用 P6 tree-sitter 8 语言 grammar 收集 ERROR/MISSING 节点；`write_file` 出口钩子（失败静默不影响写入主路径）+ ReAct 图 agent 节点调 LLM 前 `[LSP 诊断注入]` user message 注入 + renderer 显示；三条路径（ReAct / Plan / team worker）复用 `build_react_graph` 全覆盖；`ASTERCLI_LSP_ENABLED`（默认开）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20） | REPL 内让 Agent 写坏一个 `.py` 文件，下一轮 LLM 输入含 `[LSP 诊断注入]` + `[error]` 行且 Agent 据此修复；`ASTERCLI_LSP_ENABLED=false` 后不再收集；修复文件后 pending 清空；`uv run pytest` 全绿 |
 
-**明确暂不迁移**（后续再议）：微信 iLink 通道、LSP 诊断、Chrome DevTools/CDP、完整 TUI 视觉（底部状态栏/dock/live thinking 区）、Side-Git 快照、Runtime API、图片输入、Lanterna 降级。
+**明确暂不迁移**（后续再议）：微信 iLink 通道、Chrome DevTools/CDP、完整 TUI 视觉（底部状态栏/dock/live thinking 区）、Side-Git 快照、Runtime API、图片输入、Lanterna 降级。
 
 ## 本次执行范围：P1 + P2 文件级步骤
 
@@ -191,3 +192,19 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 - 测试 410 → 526（web 36 / skill 42 / orchestrator 38；全部中文命名、零网络：MockTransport、getaddrinfo monkeypatch、FakeTeamModel 按角色括号词分派）
 
 **live smoke（真实 API）**：web_fetch 真实抓取 example.com 转 Markdown（标题/正文/相对链接全对）；Skill 项目级 SKILL.md 三层加载→索引段→load_skill→buffer 注入全链路生效；`/team` 真实 deepseek-v4-pro 协作跑通两步依赖链（planner 拆步骤→worker read_file→reviewer 审查 step_1 首轮拒绝并给出"未引用实际内容"反馈→重试通过→step_2 总结完成，展示完整拒绝/重试生命周期）；web_search 因根 .env 无 GLM key 且 SERPAPI key 已过期，验证了真实 401 的友好识别链路（成功路径解析由单测锁死）。
+
+## P8 交付记录
+
+**选型**：对齐 Java Phase 17 的轻量形态——**进程内解析诊断，不起真实 LSP server**（Java 用 JavaParser 对 .java 做语法级诊断）。Python 版按生态对位重设计：`.py` 走内置 `ast`（消息质量最高的核心路径，source=`ast`，SyntaxError 只报首个），其余语言复用 P6 RAG 的 tree-sitter grammar（8 语言 + 别名，收集 ERROR/MISSING 节点、不深入问题节点子树避免一错多报，source=`tree-sitter`）——比 Java 只支持 .java 覆盖面更宽，且零新增依赖。
+
+**交付内容**：
+
+- `lsp/`：`diagnostics.py`（`LspDiagnostic` 默认值规范化对齐 Java record 紧凑构造器：None severity→INFO、负行列→1、空 source→"lsp"；`LspDiagnosticReport` prompt/display 双通道）、`formatter.py`（`[LSP 诊断注入]` 标题 + 修复指引 + `- [severity] path:line:col message (source)` 行格式对齐 Java；上限 `ASTERCLI_LSP_MAX_DIAGNOSTICS` 默认 20，omitted 提示）、`manager.py`（`run_post_edit_lsp_hook`：非普通文件/不支持后缀清除该文件旧诊断、任何异常静默不影响写入主路径；`flush_pending_diagnostics`：severity→文件→行→列排序取走清空；开关 `ASTERCLI_LSP_ENABLED` 仅显式 false 关闭）
+- `tools/registry.py`：`set_lsp_manager` / `run_post_edit_lsp_hook` / `flush_pending_lsp_diagnostics`（None=诊断整体禁用，对齐 Java lspManager 为 null）；`write_file` 出口接钩子（诊断失败不影响写入结果）
+- `agent/graph.py`：agent 节点调 LLM 前 flush pending → `[LSP 诊断注入]` HumanMessage 注入 + renderer 显示（注入点在历史压缩之后：永远属尾部轮次不会被压进摘要、不会随全量替换通道重复入列）；注入消息进 state 历史**跨轮保留**（对齐 Java conversationHistory.add(user)）；ReAct / Plan / team worker 三路径复用 `build_react_graph` 全覆盖
+- `cli/main.py`：ReplApp 装配 `LspManager` 挂 registry（cwd 为项目根）
+- 测试 526 → 549（lsp 23：模型 4 / formatter 5 / manager 12 / 图注入集成 2——图注入测试对齐 Java AgentLspDiagnosticsTest：假模型记录每次 astream 的 messages，断言坏文件写入后下一轮请求含 `[LSP 诊断注入]`/`[error]`、修复后无新增注入且历史保留）
+
+**live smoke（真实 API）**：deepseek-v4-flash 一次性模式（管道喂 `a` 过 HITL 审批）让 Agent 写入 `def broken(:` 坏文件 → 终端显示 `🔎 LSP 诊断 - [error] smoke_broken.py:1:12 invalid syntax (ast)` → Agent 下一轮准确复述"line 1, column 12 缺少右括号"并修复为 `def broken():` → 二次写入无新诊断，最终文件 ast.parse 通过。
+
+**与 Java 版的差异**：诊断引擎 JavaParser 单语言 → ast + tree-sitter 多语言；Java 无 renderer 显示链路（injectPendingLspDiagnostics 只进 conversationHistory），Python 版同时 info 显示；Java 开关读系统属性 + 环境变量两级，Python 版只走 Settings 环境变量口径。

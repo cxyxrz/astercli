@@ -4,7 +4,7 @@
 
 - Java 版 = 生产版本，Python 侧改动不回写 Java 代码
 - 分期路线图：仓库 `.trae/documents/python-langchain-rewrite.md`
-- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）
+- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）
 
 ## 运行
 
@@ -126,4 +126,4 @@ uv run pytest                            # 全量单测
 - MCP 用户级配置目录为 `~/.astercli-py`（与 Java `~/.astercli` 隔离）；step_search 自动内置未迁移；HTTP/SSE transport 由官方 SDK 保证（单测仅覆盖 stdio 集成）
 - RAG 分块/分词/存储与 Java 的差异：tree-sitter 八语言符号分块（Java 仅 JavaParser 单语言）、查询分词零依赖（Java jieba）、per-project 独立库（Java 单库混多项目）、关键词底分 0.15（Java 0.3，实测修正防关键词噪音压过语义命中）
 - Multi-Agent 依赖批次内顺序执行（Java Worker 池并行）；Java builtin（jar 内置）skill 层暂无 Python 内置资产；web_search 不迁移 step-3.7-flash 下转调 StepSearch MCP 的偏好
-- LSP 诊断在后续分期
+- LSP 诊断引擎差异：`.py` 内置 ast + 其余 tree-sitter 多语言（Java 仅 JavaParser 单 .java）；诊断同时进 renderer 显示（Java 只进 conversationHistory）；开关仅环境变量口径（Java 另支持系统属性）

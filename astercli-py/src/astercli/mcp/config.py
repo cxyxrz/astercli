@@ -96,52 +96,8 @@ def load_merged_config(settings: Settings, root: Path) -> dict:
     return configs
 
 
-def prepare_server(name: str, entry: dict, settings: Settings) -> McpServerConfig:
-    """校验 + ``${VAR}`` 展开单个 server 条目。"""
-    command = _expand_str(_opt_str(entry, "command", name), settings, name)
-    url = _expand_str(_opt_str(entry, "url", name), settings, name)
-    if command and url:
-        raise McpConfigError(f"server '{name}': command 与 url 互斥，只能设置其一")
-    if not command and not url:
-        raise McpConfigError(f"server '{name}': 必须设置 command（stdio）或 url（http/sse）之一")
 
-    raw_type = str(entry.get("type") or "").strip().lower()
-    if command:
-        if raw_type and raw_type not in ("stdio",):
-            raise McpConfigError(f"server '{name}': 配置了 command 时 type 只能是 stdio")
-        transport = "stdio"
-    elif raw_type == TYPE_SSE:
-        transport = "sse"
-    elif raw_type and raw_type not in TYPE_HTTP:
-        raise McpConfigError(f"server '{name}': 未知 type '{raw_type}'（允许: stdio/http/sse）")
-    else:
-        transport = "http"
 
-    args_raw = entry.get("args") or []
-    if not isinstance(args_raw, list):
-        raise McpConfigError(f"server '{name}': args 必须是数组")
-    args = [_expand_str(str(a), settings, name) for a in args_raw]
-
-    env_raw = entry.get("env") or {}
-    if not isinstance(env_raw, dict):
-        raise McpConfigError(f"server '{name}': env 必须是对象")
-    env = {str(k): _expand_str(str(v), settings, name) for k, v in env_raw.items()}
-
-    headers_raw = entry.get("headers") or {}
-    if not isinstance(headers_raw, dict):
-        raise McpConfigError(f"server '{name}': headers 必须是对象")
-    headers = {str(k): _expand_str(str(v), settings, name) for k, v in headers_raw.items()}
-
-    return McpServerConfig(
-        name=name,
-        command=command,
-        args=args,
-        env=env,
-        url=url,
-        headers=headers,
-        transport=transport,
-        disabled=bool(entry.get("disabled", False)),
-    )
 
 
 def _opt_str(entry: dict, key: str, server_name: str) -> Optional[str]:
