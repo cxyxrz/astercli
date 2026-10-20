@@ -12,7 +12,11 @@ import java.util.regex.Pattern;
  * 设计取舍：
  * - 不做完整 shell 解析，只做正则模式匹配，够覆盖明显破坏性命令即可
  * - 命令替换段 $(...) 和反引号内的内容仍以原文存在，正则会一并扫描，不需要单独展开
- * - curl / git / 网络命令默认放行，只拦真正破坏性的（rm -rf 全盘、sudo、mkfs 等）
+ * - 管道进 shell 解释器（curl|sh、base64 -d|sh、echo|sh）一律拦截，执行脚本请走 bash script.sh 形式
+ * - git 只拦本身语义即破坏的（clean -f 删文件、reset --hard 丢工作区修改）；
+ *   push --force 等有正当用途的交由 HITL 审批判断
+ * - 解释器内联（python -c / node -e）不在黑名单拦截范围：bash -c 本身就是执行载体，
+ *   黑名单挡不住内联代码，强约束请开启白名单模式（ASTERCLI_COMMAND_MODE=whitelist）
  */
 public final class CommandGuard {
 
@@ -30,14 +34,23 @@ public final class CommandGuard {
                     Pattern.compile("(?i)\\bdd\\b[^\\n]*\\bof=/dev/")),
             new DenyRule("识别为 fork bomb",
                     Pattern.compile(":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:\\s*&\\s*\\}\\s*;\\s*:")),
-            new DenyRule("禁止 curl / wget 管道直接执行远端脚本",
-                    Pattern.compile("(?i)\\b(curl|wget)\\b[^|\\n]*\\|\\s*(sh|bash|zsh|fish|ksh)\\b")),
+            new DenyRule("禁止管道进 shell 解释器执行",
+                    Pattern.compile("(?i)\\|\\s*(sh|bash|zsh|fish|ksh|dash)\\b")),
             new DenyRule("不允许扫描 /、~ 或整个文件系统",
                     Pattern.compile("(?i)\\bfind\\s+(/|~|\\$home)")),
             new DenyRule("禁止 chmod 777 全盘",
                     Pattern.compile("(?i)\\bchmod\\s+-R\\s+777\\s+(/|~)")),
             new DenyRule("禁止 shutdown / reboot / halt",
-                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b"))
+                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b")),
+            new DenyRule("禁止 git clean -f 删除未跟踪文件",
+                    // 不加 \b：-fdx / -xdf 等 f 后跟其他 flag 字母时仍需命中；-n（dry-run）无 f 自然放行
+                    Pattern.compile("(?i)\\bgit\\s+clean\\s+(-[a-z]*f|--force)")),
+            new DenyRule("禁止 git reset --hard 丢弃工作区修改",
+                    Pattern.compile("(?i)\\bgit\\s+reset\\s+--hard\\b")),
+            new DenyRule("禁止重定向写 authorized_keys",
+                    Pattern.compile("(?i)(>>?)\\s*[^|]*\\bauthorized_keys\\b")),
+            new DenyRule("禁止重定向写 /etc/ 系统配置",
+                    Pattern.compile("(?i)(>>?)\\s*/etc/"))
     );
 
     private CommandGuard() {

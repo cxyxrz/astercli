@@ -245,7 +245,8 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 `com.astercli.policy` 包，作为 HITL 之外的辅助层（不是沙箱、不提供进程隔离）：
 
 - `PathGuard` 路径围栏：文件类工具强制限定在项目根之内，拦截绝对路径外逃 / `..` 穿越 / 符号链接逃逸
-- `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
+- `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `find /` / `chmod 777 /` / `shutdown` / `git clean -f` / `git reset --hard` / 重定向写 `authorized_keys` 与 `/etc/`），减少 HITL 弹窗骚扰
+- 命令白名单模式（可选）：`ASTERCLI_COMMAND_MODE=whitelist`（或 `-Dastercli.command.mode=whitelist`）开启后 `execute_command` 必须精确命中项目级 `.astercli/commands.json` 的 `allowlist`；与黑名单叠加生效，文件缺失 fail-safe 全拒
 - `AuditLog` 结构化审计：危险工具调用按天写 JSONL 到 `~/.astercli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`；`revert_turn` 也纳入危险工具链
 - `write_file` 单文件 5MB 上限
 - CLI 命令：`/policy` 查看安全策略状态、`/audit [N]` 看最近 N 条审计
@@ -341,7 +342,7 @@ Tips for getting started:
 ### 第六期 HITL 增强
 
 - 🛡️ 路径围栏：文件类工具强制限定在项目根之内，绝对路径外逃 / `..` 穿越 / 符号链接逃逸全部拦截
-- 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
+- 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `find /` / `chmod 777 /` / `shutdown` / `git clean -f` / `git reset --hard` / 重定向写 `authorized_keys` 与 `/etc/`），减少 HITL 弹窗骚扰；另有可选命令白名单模式（`ASTERCLI_COMMAND_MODE=whitelist` + 项目级 `.astercli/commands.json`）
 - 📦 资源上限：`write_file` 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
 - 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.astercli/audit/`，可通过 `/audit [N]` 查看
 - 🧱 定位：HITL 之外的辅助层，不是沙箱、不提供进程隔离
@@ -628,7 +629,7 @@ I
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
-- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令）
+- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令；`ASTERCLI_COMMAND_MODE=whitelist` 开启后需精确命中 `.astercli/commands.json` 白名单）
 - `create_project` - 创建项目结构（java/python/node）
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
 - `web_search` - 搜索互联网获取实时信息
@@ -639,7 +640,7 @@ I
 
 同一轮模型返回多个工具调用时，AsterCLI 会并行执行这些工具；如果工具之间有依赖关系，模型应分多轮调用。
 
-文件类与代码检索工具（`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝；`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
+文件类与代码检索工具（`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝；`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `git clean -f` / `git reset --hard` 等，开启 `ASTERCLI_COMMAND_MODE=whitelist` 后还必须精确命中 `.astercli/commands.json` 白名单。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
 
 ## 命令
 

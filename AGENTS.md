@@ -157,7 +157,8 @@ src/main/java/com/astercli/
 - 拦截顺序：HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard
 - 用户无法批准策略拒绝的请求
 - PathGuard 强制路径限定在项目根内
-- CommandGuard 是辅助黑名单，不是主防线
+- CommandGuard 是辅助黑名单，不是主防线；管道进 shell 解释器一律拦截，git 只拦语义即破坏的（`clean -f` / `reset --hard`），另拦重定向写 `authorized_keys` 与 `/etc/`
+- 终端通道可选命令白名单模式：`ASTERCLI_COMMAND_MODE=whitelist`（或 `-Dastercli.command.mode=whitelist`）开启后，`execute_command` 必须精确命中项目级 `.astercli/commands.json` 的 `allowlist`（trim 后全串匹配，大小写敏感）；白名单与黑名单叠加生效，命中白名单仍走 HITL 审批；文件缺失/解析失败按空名单 fail-safe 全拒
 - 微信 iLink 通道没有人工审批面板，必须走非交互式默认拒绝策略：只读工具默认允许，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝，文件写入仍由 PathGuard 限定在绑定 workspace 内。
 
 ### Plan 审阅交互

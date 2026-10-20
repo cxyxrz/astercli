@@ -42,6 +42,35 @@ class ToolRegistryTest {
     }
 
     @Test
+    void shouldEnforceCommandAllowlistInWhitelistMode(@TempDir Path tempDir) throws Exception {
+        // 项目级白名单文件 + 系统属性开启白名单模式，走真实加载路径
+        Path configDir = tempDir.resolve(".astercli");
+        Files.createDirectories(configDir);
+        Files.writeString(configDir.resolve("commands.json"), "{\"allowlist\": [\"echo allowlist-ok\"]}");
+        System.setProperty("astercli.command.mode", "whitelist");
+        try {
+            ToolRegistry registry = new ToolRegistry();
+            registry.setProjectPath(tempDir.toString());
+
+            // 未命中白名单：走与黑名单相同的统一策略拒绝出口
+            String denied = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
+            assertTrue(denied.contains("策略拒绝"));
+            assertTrue(denied.contains("白名单"));
+
+            // 精确命中白名单：正常执行
+            String allowed = registry.executeTool("execute_command", "{\"command\":\"echo allowlist-ok\"}");
+            assertTrue(allowed.contains("allowlist-ok"));
+
+            // 叠加语义：即使写进白名单，命中黑名单的命令仍被拒
+            String blacklisted = registry.executeTool("execute_command", "{\"command\":\"echo x > /etc/hosts\"}");
+            assertTrue(blacklisted.contains("策略拒绝"));
+        } finally {
+            // 系统属性必须清理，避免污染其他测试的默认 blacklist 行为
+            System.clearProperty("astercli.command.mode");
+        }
+    }
+
+    @Test
     void shouldReadRequestedLineRange(@TempDir Path tempDir) throws Exception {
         Path file = tempDir.resolve("Sample.java");
         Files.writeString(file, String.join("\n",

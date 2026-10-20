@@ -16,6 +16,7 @@ import com.astercli.rag.CodeRetriever;
 import com.astercli.rag.SearchResultFormatter;
 import com.astercli.rag.VectorStore;
 import com.astercli.policy.AuditLog;
+import com.astercli.policy.CommandAllowlist;
 import com.astercli.policy.CommandGuard;
 import com.astercli.policy.PathGuard;
 import com.astercli.policy.PolicyException;
@@ -100,6 +101,8 @@ public class ToolRegistry {
     private SkillContextBuffer skillContextBuffer;
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
+    // execute_command 可选白名单模式：默认 disabled（恒放行），ASTERCLI_COMMAND_MODE=whitelist 时生效
+    private CommandAllowlist commandAllowlist = CommandAllowlist.fromEnvironment(Path.of(projectPath));
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
     private volatile String currentProvider = "";
@@ -135,6 +138,7 @@ public class ToolRegistry {
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
+        this.commandAllowlist = CommandAllowlist.fromEnvironment(Path.of(projectPath));
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -1427,6 +1431,11 @@ public class ToolRegistry {
             // 抛 PolicyException 让外层 executeTool 统一写 audit 并格式化拒绝消息，
             // 命令围栏与路径围栏的拒绝路径走同一个出口。
             throw new PolicyException(denyReason);
+        }
+        // 白名单模式是叠加收紧：黑名单先生效，命中白名单的命令仍需 HITL 审批。
+        String allowlistDeny = commandAllowlist.check(normalized);
+        if (allowlistDeny != null) {
+            throw new PolicyException(allowlistDeny);
         }
 
         ExecutorService outputReaderExecutor = Executors.newSingleThreadExecutor(r -> {
