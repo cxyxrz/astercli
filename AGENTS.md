@@ -159,6 +159,7 @@ src/main/java/com/astercli/
 - PathGuard 强制路径限定在项目根内
 - CommandGuard 是辅助黑名单，不是主防线；管道进 shell 解释器一律拦截，git 只拦语义即破坏的（`clean -f` / `reset --hard`），另拦重定向写 `authorized_keys` 与 `/etc/`
 - 终端通道可选命令白名单模式：`ASTERCLI_COMMAND_MODE=whitelist`（或 `-Dastercli.command.mode=whitelist`）开启后，`execute_command` 必须精确命中项目级 `.astercli/commands.json` 的 `allowlist`（trim 后全串匹配，大小写敏感）；白名单与黑名单叠加生效，命中白名单仍走 HITL 审批；文件缺失/解析失败按空名单 fail-safe 全拒
+- 终端通道可选 OS 级命令沙箱：`ASTERCLI_COMMAND_SANDBOX=true`（或 `-Dastercli.command.sandbox=true`）开启后子进程在写围栏内运行——仅项目根 / `/tmp` / `ASTERCLI_SANDBOX_WRITABLE_PATHS`（逗号分隔，支持 `~` 展开）可写，HOME 只读；macOS 用 `sandbox-exec`（Seatbelt profile），Linux 需 `bubblewrap`；开启但平台/工具不可用时 fail-closed 拒绝执行；`ASTERCLI_SANDBOX_ALLOW_NET=false` 可断网。三层关系：黑名单（命令文本）→ 白名单（放行集合）→ 沙箱（运行时写能力）
 - 微信 iLink 通道没有人工审批面板，必须走非交互式默认拒绝策略：只读工具默认允许，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝，文件写入仍由 PathGuard 限定在绑定 workspace 内。
 
 ### Plan 审阅交互
@@ -254,7 +255,7 @@ src/main/java/com/astercli/
 
 ## 当前已知边界
 
-以下在路线图但未交付：容器/VM 沙箱 / MCP OAuth + sampling + server 自动重启
+以下在路线图但未交付：容器/VM 沙箱（OS 级命令沙箱已通过 `ASTERCLI_COMMAND_SANDBOX` 交付，见 HITL + 策略层；容器/VM 形态暂不做）/ MCP OAuth + sampling + server 自动重启
 
 不要把 `ROADMAP.md` 中"将来要做"误读成"现在已有"。
 

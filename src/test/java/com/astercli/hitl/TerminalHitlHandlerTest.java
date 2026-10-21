@@ -155,6 +155,48 @@ class TerminalHitlHandlerTest {
     }
 
     @Test
+    void mInputWithMissingRequiredParamRepromptsInsteadOfApproving() {
+        // 带必填参数约束的请求：缺 path 字段的修改必须在 HITL 层被拒并回到主菜单，
+        // 而不是放行后到工具执行才失败、浪费一整轮 ReAct
+        ApprovalRequest withRequired = ApprovalRequest.of(
+                "write_file", "{\"path\":\"/tmp/x.txt\",\"content\":\"hi\"}", null, null, null,
+                java.util.List.of("path", "content"));
+        Harness h = Harness.withInput("m\n{\"content\":\"hi\"}\nn\n放弃\n");
+
+        ApprovalResult result = h.handler.requestApproval(withRequired);
+
+        // 第一次 m 校验失败回主菜单，第二次输入 n 拒绝——证明缺字段没有直接放行
+        assertEquals(ApprovalResult.Decision.REJECTED, result.decision());
+        assertEquals("放弃", result.reason());
+        assertTrue(h.output().contains("缺少必填字段: path"),
+                "应提示缺失的必填字段；实际输出：" + h.output());
+    }
+
+    @Test
+    void mInputWithAllRequiredParamsModifies() {
+        ApprovalRequest withRequired = ApprovalRequest.of(
+                "write_file", "{\"path\":\"/tmp/x.txt\",\"content\":\"hi\"}", null, null, null,
+                java.util.List.of("path", "content"));
+        String modified = "{\"path\":\"/tmp/safe.txt\",\"content\":\"hi\"}";
+        Harness h = Harness.withInput("m\n" + modified + "\n");
+
+        ApprovalResult result = h.handler.requestApproval(withRequired);
+
+        assertEquals(ApprovalResult.Decision.MODIFIED, result.decision());
+        assertEquals(modified, result.modifiedArguments());
+    }
+
+    @Test
+    void mInputWithNonObjectJsonReprompts() {
+        // 数组是合法 JSON 但工具参数必须是对象：提示后回主菜单，第二次 y 批准
+        Harness h = Harness.withInput("m\n[1,2]\ny\n");
+        ApprovalResult result = h.handler.requestApproval(WRITE_FILE_REQUEST);
+        assertEquals(ApprovalResult.Decision.APPROVED, result.decision());
+        assertTrue(h.output().contains("必须是 JSON 对象"),
+                "应提示参数必须是对象；实际输出：" + h.output());
+    }
+
+    @Test
     void unknownInputRepromptsInsteadOfDefaultApproving() {
         // foo 不是有效选项 → 必须重新提示，绝不能默认放行（fail-safe）
         Harness h = Harness.withInput("foo\ny\n");

@@ -242,11 +242,12 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 ### 第六期 HITL 增强（路径围栏 / 命令快速拒绝 / 操作审计）
 
-`com.astercli.policy` 包，作为 HITL 之外的辅助层（不是沙箱、不提供进程隔离）：
+`com.astercli.policy` 包，作为 HITL 之外的辅助层（Path/CommandGuard 不提供进程隔离，进程写围栏由可选 OS 级命令沙箱提供，见下）：
 
 - `PathGuard` 路径围栏：文件类工具强制限定在项目根之内，拦截绝对路径外逃 / `..` 穿越 / 符号链接逃逸
 - `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `find /` / `chmod 777 /` / `shutdown` / `git clean -f` / `git reset --hard` / 重定向写 `authorized_keys` 与 `/etc/`），减少 HITL 弹窗骚扰
 - 命令白名单模式（可选）：`ASTERCLI_COMMAND_MODE=whitelist`（或 `-Dastercli.command.mode=whitelist`）开启后 `execute_command` 必须精确命中项目级 `.astercli/commands.json` 的 `allowlist`；与黑名单叠加生效，文件缺失 fail-safe 全拒
+- OS 级命令沙箱（可选）：`ASTERCLI_COMMAND_SANDBOX=true`（或 `-Dastercli.command.sandbox=true`）开启后子进程在写围栏内运行——仅项目根 / `/tmp` / `ASTERCLI_SANDBOX_WRITABLE_PATHS`（支持 `~` 展开）可写，HOME 只读，读操作全部放行；macOS 用 `sandbox-exec`，Linux 需 `bubblewrap`，平台/工具不可用时 fail-closed 拒绝；`ASTERCLI_SANDBOX_ALLOW_NET=false` 可断网
 - `AuditLog` 结构化审计：危险工具调用按天写 JSONL 到 `~/.astercli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`；`revert_turn` 也纳入危险工具链
 - `write_file` 单文件 5MB 上限
 - CLI 命令：`/policy` 查看安全策略状态、`/audit [N]` 看最近 N 条审计
@@ -342,10 +343,10 @@ Tips for getting started:
 ### 第六期 HITL 增强
 
 - 🛡️ 路径围栏：文件类工具强制限定在项目根之内，绝对路径外逃 / `..` 穿越 / 符号链接逃逸全部拦截
-- 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `find /` / `chmod 777 /` / `shutdown` / `git clean -f` / `git reset --hard` / 重定向写 `authorized_keys` 与 `/etc/`），减少 HITL 弹窗骚扰；另有可选命令白名单模式（`ASTERCLI_COMMAND_MODE=whitelist` + 项目级 `.astercli/commands.json`）
+- 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / 管道进 shell 解释器 / `find /` / `chmod 777 /` / `shutdown` / `git clean -f` / `git reset --hard` / 重定向写 `authorized_keys` 与 `/etc/`），减少 HITL 弹窗骚扰；另有可选命令白名单模式（`ASTERCLI_COMMAND_MODE=whitelist` + 项目级 `.astercli/commands.json`）与可选 OS 级命令沙箱（`ASTERCLI_COMMAND_SANDBOX=true`，macOS `sandbox-exec` / Linux `bubblewrap`）
 - 📦 资源上限：`write_file` 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
 - 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.astercli/audit/`，可通过 `/audit [N]` 查看
-- 🧱 定位：HITL 之外的辅助层，不是沙箱、不提供进程隔离
+- 🧱 定位：Path/CommandGuard 是 HITL 之外的辅助层，不提供进程隔离；进程写围栏由可选 OS 级命令沙箱（`ASTERCLI_COMMAND_SANDBOX=true`）提供
 
 ## 快速开始
 
@@ -629,7 +630,7 @@ I
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
-- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令；`ASTERCLI_COMMAND_MODE=whitelist` 开启后需精确命中 `.astercli/commands.json` 白名单）
+- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令；`ASTERCLI_COMMAND_MODE=whitelist` 开启后需精确命中 `.astercli/commands.json` 白名单；`ASTERCLI_COMMAND_SANDBOX=true` 开启后子进程运行在 OS 级写围栏内）
 - `create_project` - 创建项目结构（java/python/node）
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
 - `web_search` - 搜索互联网获取实时信息

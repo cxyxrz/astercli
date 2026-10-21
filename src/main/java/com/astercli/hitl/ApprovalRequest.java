@@ -20,7 +20,8 @@ public record ApprovalRequest(
         String riskDescription,
         String suggestion,
         String callerContext,
-        String sensitiveNotice
+        String sensitiveNotice,
+        List<String> requiredParams
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;
@@ -38,6 +39,14 @@ public record ApprovalRequest(
 
     public static ApprovalRequest of(String toolName, String arguments, String suggestion, String callerContext,
                                      String sensitiveNotice) {
+        return of(toolName, arguments, suggestion, callerContext, sensitiveNotice, List.of());
+    }
+
+    /**
+     * 带必填参数名的工厂（HITL 修改参数时提交前校验用；调用方从 ToolRegistry 取）。
+     */
+    public static ApprovalRequest of(String toolName, String arguments, String suggestion, String callerContext,
+                                     String sensitiveNotice, List<String> requiredParams) {
         return new ApprovalRequest(
                 toolName,
                 arguments,
@@ -45,7 +54,8 @@ public record ApprovalRequest(
                 ApprovalPolicy.getRiskDescription(toolName),
                 suggestion,
                 callerContext,
-                sensitiveNotice
+                sensitiveNotice,
+                requiredParams == null ? List.of() : List.copyOf(requiredParams)
         );
     }
 

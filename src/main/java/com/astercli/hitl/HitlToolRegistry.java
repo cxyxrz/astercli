@@ -55,7 +55,8 @@ public class HitlToolRegistry extends ToolRegistry {
 
     private ToolOutput executeAfterExplicitApproval(String name, String argumentsJson, String sensitiveNotice) {
         long start = System.nanoTime();
-        ApprovalRequest request = ApprovalRequest.of(name, argumentsJson, null, null, sensitiveNotice);
+        ApprovalRequest request = ApprovalRequest.of(name, argumentsJson, null, null, sensitiveNotice,
+                getRequiredParamNames(name));
         ApprovalResult result = hitlHandler.requestApproval(request);
 
         if (result.isRejected()) {

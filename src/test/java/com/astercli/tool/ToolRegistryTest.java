@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.astercli.browser.BrowserConnector;
 import com.astercli.mcp.protocol.McpToolDescriptor;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
@@ -68,6 +70,85 @@ class ToolRegistryTest {
             // 系统属性必须清理，避免污染其他测试的默认 blacklist 行为
             System.clearProperty("astercli.command.mode");
         }
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void shouldRunCommandInsideSandboxOnMac(@TempDir Path tempDir) throws Exception {
+        // 真实跑 sandbox-exec：这是 Seatbelt profile DSL 语法正确性的唯一真实验证（字符串单测查不出 DSL 写错）
+        System.setProperty("astercli.command.sandbox", "true");
+        Path denyTarget = Path.of(System.getProperty("user.home"), ".astercli-sandbox-deny-test");
+        try {
+            ToolRegistry registry = new ToolRegistry();
+            registry.setProjectPath(tempDir.toString());
+
+            // 项目根内可写：exit code 0
+            String inside = registry.executeTool("execute_command",
+                    "{\"command\":\"echo hi > sandbox-ok.txt\"}");
+            assertTrue(inside.contains("exit code: 0"), inside);
+            assertTrue(Files.exists(tempDir.resolve("sandbox-ok.txt")));
+
+            // /tmp 可写：exit code 0
+            String tmpWrite = registry.executeTool("execute_command",
+                    "{\"command\":\"echo t > /tmp/astercli-sandbox-test\"}");
+            assertTrue(tmpWrite.contains("exit code: 0"), tmpWrite);
+
+            // HOME 越界写：沙箱拒绝（exit code 非零），且目标文件不产生
+            String denied = registry.executeTool("execute_command",
+                    "{\"command\":\"echo x > " + denyTarget + "\"}");
+            assertFalse(denied.contains("exit code: 0"), denied);
+            assertFalse(Files.exists(denyTarget));
+        } finally {
+            System.clearProperty("astercli.command.sandbox");
+            Files.deleteIfExists(denyTarget);
+            Files.deleteIfExists(Path.of("/tmp/astercli-sandbox-test"));
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void shouldRunCommandInsideSandboxOnLinux(@TempDir Path tempDir) throws Exception {
+        // Linux 上需要已安装 bubblewrap；未安装时该用例因沙箱 fail-closed 而失败，属预期提示
+        System.setProperty("astercli.command.sandbox", "true");
+        try {
+            ToolRegistry registry = new ToolRegistry();
+            registry.setProjectPath(tempDir.toString());
+
+            String inside = registry.executeTool("execute_command",
+                    "{\"command\":\"echo hi > sandbox-ok.txt\"}");
+            assertTrue(inside.contains("exit code: 0"), inside);
+        } finally {
+            System.clearProperty("astercli.command.sandbox");
+        }
+    }
+
+    @Test
+    void getRequiredParamNamesReturnsEmptyForUnknownTool() {
+        ToolRegistry registry = new ToolRegistry();
+        // 未知工具按无约束处理，HITL 修改参数校验跳过
+        assertTrue(registry.getRequiredParamNames("no_such_tool").isEmpty());
+    }
+
+    @Test
+    void getRequiredParamNamesReadsBuiltInToolSchema() {
+        ToolRegistry registry = new ToolRegistry();
+        List<String> required = registry.getRequiredParamNames("write_file");
+        // write_file 注册时 path / content 均必填（HITL 修改参数提交前校验用）
+        assertEquals(2, required.size());
+        assertTrue(required.contains("path"));
+        assertTrue(required.contains("content"));
+    }
+
+    @Test
+    void getRequiredParamNamesReadsMcpInputSchema() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        JsonNode schema = new ObjectMapper().readTree(
+                "{\"type\":\"object\",\"required\":[\"url\"],\"properties\":{\"url\":{\"type\":\"string\"}}}");
+        McpToolDescriptor descriptor = new McpToolDescriptor(
+                "demo", "fetch", "mcp__demo__fetch", "测试用工具", schema);
+        registry.registerMcpTool(descriptor, args -> "ok");
+
+        assertEquals(List.of("url"), registry.getRequiredParamNames("mcp__demo__fetch"));
     }
 
     @Test

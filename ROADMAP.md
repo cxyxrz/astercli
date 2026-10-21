@@ -118,7 +118,7 @@
 
 **HITL 增强（后续补丁，归在本期叙事下）**：
 - `PathGuard` 路径围栏：`read_file` / `write_file` / `list_dir` / `create_project` 强制限定在项目根之内，拦截绝对路径越界、`..` 穿越、符号链接逃逸
-- `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（sudo / rm -rf 全盘 / mkfs / dd 写裸设备 / fork bomb / curl|sh / find / / chmod 777 / / shutdown），减少 HITL 弹窗骚扰
+- `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（sudo / rm -rf 全盘 / mkfs / dd 写裸设备 / fork bomb / 管道进 shell 解释器 / find / / chmod 777 / / shutdown / git clean -f / git reset --hard / 重定向写 authorized_keys 与 /etc/），减少 HITL 弹窗骚扰
 - `AuditLog` 操作审计链：危险工具调用按天写 JSONL 到 `~/.astercli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`
 - `write_file` 单文件 5MB 上限
 - CLI 命令：`/policy` 看安全策略状态、`/audit [N]` 看最近审计
@@ -127,6 +127,7 @@
 - 真正的沙箱是隔离的执行环境（Docker / microVM / chroot），本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差
 - AsterCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离
 - 想做容器隔离的请参考 Pro 升级版本章节，或自行实现 `SandboxDriver` 接口
+- 状态更新：后续已交付**可选** OS 级命令沙箱（`ASTERCLI_COMMAND_SANDBOX`，macOS `sandbox-exec` / Linux `bubblewrap` 写文件系统围栏，默认关闭、开启即围栏）——默认安全模型不变，容器/VM 形态仍然不做
 
 **核心知识点**：
 - HITL（人机协同）

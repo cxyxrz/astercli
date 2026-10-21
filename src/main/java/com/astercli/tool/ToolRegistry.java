@@ -17,6 +17,7 @@ import com.astercli.rag.SearchResultFormatter;
 import com.astercli.rag.VectorStore;
 import com.astercli.policy.AuditLog;
 import com.astercli.policy.CommandAllowlist;
+import com.astercli.policy.CommandSandbox;
 import com.astercli.policy.CommandGuard;
 import com.astercli.policy.PathGuard;
 import com.astercli.policy.PolicyException;
@@ -103,6 +104,8 @@ public class ToolRegistry {
     private LspManager lspManager = new LspManager(projectPath);
     // execute_command 可选白名单模式：默认 disabled（恒放行），ASTERCLI_COMMAND_MODE=whitelist 时生效
     private CommandAllowlist commandAllowlist = CommandAllowlist.fromEnvironment(Path.of(projectPath));
+    // execute_command 可选 OS 级沙箱：默认 disabled（裸 bash），ASTERCLI_COMMAND_SANDBOX=true 时生效
+    private CommandSandbox commandSandbox = CommandSandbox.fromEnvironment(Path.of(projectPath));
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
     private volatile String currentProvider = "";
@@ -139,6 +142,7 @@ public class ToolRegistry {
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
         this.commandAllowlist = CommandAllowlist.fromEnvironment(Path.of(projectPath));
+        this.commandSandbox = CommandSandbox.fromEnvironment(Path.of(projectPath));
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -1246,6 +1250,36 @@ public class ToolRegistry {
         return new ToolOutput(truncated, output.imageParts());
     }
 
+    /**
+     * 获取工具的必填参数名列表（HITL 修改参数校验用）。
+     * 内置工具取自注册时的 parameters.required；MCP 动态工具取自 server 提供的
+     * inputSchema.required。未知工具 / 无 required 定义时返回空列表（调用方按无约束处理）。
+     */
+    public List<String> getRequiredParamNames(String name) {
+        Tool tool = tools.get(name);
+        JsonNode required = null;
+        if (tool != null) {
+            required = tool.parameters() == null ? null : tool.parameters().path("required");
+        } else {
+            McpRegisteredTool mcpTool = mcpTools.get(name);
+            if (mcpTool != null) {
+                required = mcpTool.descriptor().inputSchema() == null
+                        ? null : mcpTool.descriptor().inputSchema().path("required");
+            }
+        }
+        if (required == null || !required.isArray() || required.isEmpty()) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        required.forEach(node -> {
+            String text = node.asText(null);
+            if (text != null && !text.isBlank()) {
+                names.add(text);
+            }
+        });
+        return List.copyOf(names);
+    }
+
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
         if (CancellationContext.isCancelled()) {
             return ToolOutput.text("用户取消了此次工具调用");
@@ -1437,6 +1471,10 @@ public class ToolRegistry {
         if (allowlistDeny != null) {
             throw new PolicyException(allowlistDeny);
         }
+        // 第三层 OS 级沙箱：包装 argv（未开启时返回裸 bash）；开启但平台/工具不可用时
+        // 在此抛 PolicyException，与黑/白名单共用统一策略拒绝出口。放 try 之前，
+        // 保证策略异常不会被下面的 catch(Exception) 吞成普通执行失败。
+        List<String> commandArgv = commandSandbox.wrap(normalized, projectPath);
 
         ExecutorService outputReaderExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "astercli-command-output");
@@ -1446,7 +1484,7 @@ public class ToolRegistry {
 
         Process process = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
+            ProcessBuilder pb = new ProcessBuilder(commandArgv);
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
             process = pb.start();
