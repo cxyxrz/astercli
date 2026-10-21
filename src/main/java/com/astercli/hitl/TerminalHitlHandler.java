@@ -1,15 +1,10 @@
 package com.astercli.hitl;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -30,8 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
  *   审批提示活跃，避免 stdout 串扰与 stdin 争抢。
  */
 public class TerminalHitlHandler implements HitlHandler {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private volatile boolean enabled;
 
@@ -217,29 +210,11 @@ public class TerminalHitlHandler implements HitlHandler {
         }
 
         String trimmed = modified.trim();
-        JsonNode parsed;
-        try {
-            parsed = MAPPER.readTree(trimmed);
-        } catch (Exception e) {
-            out.println("  ❌ 修改后的参数不是合法 JSON：" + e.getMessage());
+        // 提交前共享校验（JSON 合法 + 对象 + 必填齐全），缺字段在 HITL 层就拒
+        String validationError = request.validateModification(trimmed);
+        if (validationError != null) {
+            out.println("  ❌ " + validationError);
             return null;  // 回到主菜单
-        }
-        if (!parsed.isObject()) {
-            out.println("  ❌ 工具参数必须是 JSON 对象（形如 {\"key\": ...}）");
-            return null;
-        }
-        // 提交前校验必填参数：缺字段在 HITL 层就拒，避免放行后到工具执行才失败、浪费一整轮 ReAct
-        if (request.requiredParams() != null && !request.requiredParams().isEmpty()) {
-            List<String> missing = new ArrayList<>();
-            for (String requiredName : request.requiredParams()) {
-                if (!parsed.has(requiredName)) {
-                    missing.add(requiredName);
-                }
-            }
-            if (!missing.isEmpty()) {
-                out.println("  ❌ 修改后的参数缺少必填字段: " + String.join(", ", missing));
-                return null;  // 回到主菜单重新输入
-            }
         }
         return ApprovalResult.modify(trimmed);
     }

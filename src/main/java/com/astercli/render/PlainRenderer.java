@@ -242,10 +242,10 @@ public final class PlainRenderer implements Renderer {
         }
 
         String trimmed = modified.trim();
-        try {
-            JSON.readTree(trimmed);
-        } catch (Exception e) {
-            out.println("  ❌ 修改后的参数不是合法 JSON：" + e.getMessage());
+        // 共享提交前校验（JSON 合法 + 对象 + 必填齐全），缺字段在 HITL 层就拒
+        String validationError = request.validateModification(trimmed);
+        if (validationError != null) {
+            out.println("  ❌ " + validationError);
             return null;
         }
         return ApprovalResult.modify(trimmed);

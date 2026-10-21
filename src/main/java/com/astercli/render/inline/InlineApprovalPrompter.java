@@ -168,10 +168,10 @@ public final class InlineApprovalPrompter {
             return ApprovalResult.approve();
         }
         String trimmed = modified.trim();
-        try {
-            JSON.readTree(trimmed);
-        } catch (Exception e) {
-            out.println(AnsiStyle.subtle("  ❌ 非法 JSON: " + e.getMessage()));
+        // 共享提交前校验（JSON 合法 + 对象 + 必填齐全），缺字段在 HITL 层就拒
+        String validationError = request.validateModification(trimmed);
+        if (validationError != null) {
+            out.println(AnsiStyle.subtle("  ❌ " + validationError));
             return null;
         }
         return ApprovalResult.modify(trimmed);

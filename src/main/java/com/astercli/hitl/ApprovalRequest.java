@@ -60,6 +60,35 @@ public record ApprovalRequest(
     }
 
     /**
+     * 校验 HITL 修改参数的提交内容：JSON 合法性 + 必须是对象 + 必填字段齐全。
+     * 三个审批实现（TerminalHitlHandler / InlineApprovalPrompter / PlainRenderer）共用，
+     * 缺字段在 HITL 层就拒，避免放行后到工具执行才失败、浪费一整轮 ReAct。
+     *
+     * @return null 表示通过；否则返回中文错误文案（调用方自行渲染）
+     */
+    public String validateModification(String modifiedJson) {
+        JsonNode parsed;
+        try {
+            parsed = MAPPER.readTree(modifiedJson);
+        } catch (Exception e) {
+            return "修改后的参数不是合法 JSON：" + e.getMessage();
+        }
+        if (!parsed.isObject()) {
+            return "工具参数必须是 JSON 对象（形如 {\"key\": ...}）";
+        }
+        if (requiredParams == null || requiredParams.isEmpty()) {
+            return null;
+        }
+        List<String> missing = new ArrayList<>();
+        for (String name : requiredParams) {
+            if (!parsed.has(name)) {
+                missing.add(name);
+            }
+        }
+        return missing.isEmpty() ? null : "修改后的参数缺少必填字段: " + String.join(", ", missing);
+    }
+
+    /**
      * 格式化为可读的展示文本
      *
      * 所有 padding 都按"终端显示列宽"计算（CJK / emoji 占 2 列），不再按字符数 pad，
