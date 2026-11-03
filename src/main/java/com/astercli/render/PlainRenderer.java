@@ -226,7 +226,7 @@ public final class PlainRenderer implements Renderer {
 
     private ApprovalResult promptModifiedArguments(ApprovalRequest request) {
         out.println("  当前参数：" + request.arguments());
-        out.print("  请输入修改后的参数（JSON 格式，空行则使用原始参数）：");
+        out.print("  请输入修改后的参数（JSON 格式，直接回车放弃修改）：");
         out.flush();
 
         String modified;
@@ -237,8 +237,10 @@ public final class PlainRenderer implements Renderer {
             return null;
         }
         if (modified == null || modified.isBlank()) {
-            out.println("  输入为空，改为批准原始参数");
-            return ApprovalResult.approve();
+            // 按 m 的意图是修改参数：空行不等于批准原参数，回到选项菜单；
+            // 想按原始参数执行应显式选 y
+            out.println("  未输入修改内容，已取消修改（按 y 可批准原始参数）");
+            return null;
         }
 
         String trimmed = modified.trim();

@@ -8,17 +8,14 @@ import com.astercli.util.AnsiStyle;
 import org.jline.terminal.Attributes;
 import org.jline.terminal.Terminal;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
 
 /**
  * Inline 形态的 HITL 审批提示。
  *
  * <p>主菜单选项 {@code y / a / n / s / m} 通过 raw mode 单字符读取（不需要回车），
- * 后续输入（拒绝原因、新参数 JSON）回退到 {@code BufferedReader.readLine}。
+ * 后续输入（拒绝原因、新参数 JSON）统一通过 {@code terminal.reader()} 逐字符读取至换行。
  *
  * <p>有意保持和 {@link com.astercli.render.PlainRenderer#promptApproval} 一致的语义；
  * 只是首选项交互更紧凑。
@@ -30,16 +27,10 @@ public final class InlineApprovalPrompter {
 
     private final PrintStream out;
     private final Terminal terminal;
-    private final BufferedReader stdinReader;
 
     public InlineApprovalPrompter(PrintStream out, Terminal terminal) {
-        this(out, terminal, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)));
-    }
-
-    InlineApprovalPrompter(PrintStream out, Terminal terminal, BufferedReader stdinReader) {
         this.out = out;
         this.terminal = terminal;
-        this.stdinReader = stdinReader;
     }
 
     public ApprovalResult prompt(ApprovalRequest request) {
@@ -118,15 +109,51 @@ public final class InlineApprovalPrompter {
         }
     }
 
+    private String readLineFromTerminal() {
+        Attributes original = null;
+        try {
+            original = terminal.enterRawMode();
+        } catch (Exception ignored) {
+        }
+        try {
+            StringBuilder sb = new StringBuilder();
+            while (true) {
+                int c = terminal.reader().read();
+                if (c == -1) return null;
+                if (c == '\n' || c == '\r') {
+                    out.println();
+                    out.flush();
+                    return sb.toString();
+                }
+                if (c == 127 || c == 8) {
+                    if (!sb.isEmpty()) {
+                        sb.deleteCharAt(sb.length() - 1);
+                        out.print("\b \b");
+                        out.flush();
+                    }
+                    continue;
+                }
+                sb.append((char) c);
+                out.print((char) c);
+                out.flush();
+            }
+        } catch (IOException e) {
+            return null;
+        } finally {
+            if (original != null) {
+                try {
+                    terminal.setAttributes(original);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
     private String promptForReason() {
         out.print("  拒绝原因（可直接回车跳过）: ");
         out.flush();
-        try {
-            String line = stdinReader.readLine();
-            return line == null ? "" : line.trim();
-        } catch (IOException e) {
-            return "";
-        }
+        String line = readLineFromTerminal();
+        return line == null ? "" : line.trim();
     }
 
     private ApprovalResult promptApproveAllScope(ApprovalRequest request) {
@@ -138,12 +165,7 @@ public final class InlineApprovalPrompter {
         out.println("  全部放行范围 [tool/Enter] 仅本工具  [server] 整个 MCP server " + mcpServer);
         out.print("> ");
         out.flush();
-        String scope;
-        try {
-            scope = stdinReader.readLine();
-        } catch (IOException e) {
-            scope = "";
-        }
+        String scope = readLineFromTerminal();
         String n = scope == null ? "" : scope.trim().toLowerCase();
         if ("server".equals(n) || "s".equals(n)) {
             out.println(AnsiStyle.subtle("  已批准 server 范围"));
@@ -155,17 +177,13 @@ public final class InlineApprovalPrompter {
 
     private ApprovalResult promptForModifiedArgs(ApprovalRequest request) {
         out.println("  当前参数: " + request.arguments());
-        out.print("  修改后的 JSON（空行 = 保留原参数）: ");
+        out.print("  修改后的 JSON（直接回车放弃修改）: ");
         out.flush();
-        String modified;
-        try {
-            modified = stdinReader.readLine();
-        } catch (IOException e) {
-            return null;
-        }
+        String modified = readLineFromTerminal();
         if (modified == null || modified.isBlank()) {
-            out.println(AnsiStyle.subtle("  保留原参数"));
-            return ApprovalResult.approve();
+            // 按 m 的意图是修改参数：空行不等于批准原参数，回到选项菜单
+            out.println(AnsiStyle.subtle("  未输入修改内容，已取消修改（按 y 可批准原始参数）"));
+            return null;
         }
         String trimmed = modified.trim();
         // 共享提交前校验（JSON 合法 + 对象 + 必填齐全），缺字段在 HITL 层就拒

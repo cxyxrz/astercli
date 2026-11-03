@@ -138,10 +138,14 @@ class TerminalHitlHandlerTest {
     }
 
     @Test
-    void mInputWithEmptyFallsBackToApprove() {
-        Harness h = Harness.withInput("m\n\n");
-        assertEquals(ApprovalResult.Decision.APPROVED,
-                h.handler.requestApproval(WRITE_FILE_REQUEST).decision());
+    void mInputWithEmptyCancelsModificationInsteadOfApproving() {
+        // 按 m 的意图是修改参数：空行不等于批准原参数执行，而是取消修改回到选项菜单；
+        // 随后第二次输入 n 拒绝——证明空行没有直接放行
+        Harness h = Harness.withInput("m\n\nn\n取消\n");
+        ApprovalResult result = h.handler.requestApproval(WRITE_FILE_REQUEST);
+        assertEquals(ApprovalResult.Decision.REJECTED, result.decision());
+        assertTrue(h.output().contains("已取消修改"),
+                "应提示已取消修改；实际输出：" + h.output());
     }
 
     @Test
