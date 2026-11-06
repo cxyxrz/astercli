@@ -5,6 +5,8 @@
 2. 并发执行：最多 4 并发、结果保持原始顺序、单工具超时、异常转失败结果占位。
 3. 统一输出预算：任何工具结果超过 max_chars 在出口截断并追加缩小范围提示
    （各工具自身细粒度预算优先生效，这里只做最后兜底）。
+4. 参数校验：执行前按工具 Schema 校验 required / 基本类型 / enum，
+   失败直接回给 LLM 修正文本，不进入审批与执行。
 """
 
 from __future__ import annotations
@@ -19,6 +21,12 @@ from typing import Any, Awaitable, Callable, Optional, Tuple, Union
 from langchain_core.messages import ToolMessage
 
 from ..config import TOOL_MODE_SCHEMA, TOOL_MODE_SLIM, Settings
+from ..experience.models import (
+    TRIGGER_HITL_REJECT,
+    TRIGGER_TOOL_FAILURE,
+    ReflectionTrigger,
+    args_skeleton,
+)
 from ..hitl.policy import requires_approval
 from ..lsp import EMPTY_REPORT, LspDiagnosticReport
 from ..policy import PolicyException, record_audit
@@ -59,6 +67,57 @@ def create_parameters(*params: Param) -> dict:
     return schema
 
 
+def validate_args(parameters: Optional[dict], args: dict) -> Optional[str]:
+    """按工具 Schema 做浅层参数校验，返回错误文本（None 表示通过）。
+
+    对齐 Java ApprovalRequest.validateModification 的"required 齐全"语义，
+    并额外补基本类型与 enum 约束。只校验顶层参数：object / array 内部不递归，
+    未知 Schema 构造（MCP 的 anyOf / $ref 等）与 ``null`` 值一律放行，
+    避免误伤外部 server 自定义 Schema。
+    """
+    if not isinstance(parameters, dict):
+        return None
+    required = parameters.get("required")
+    if isinstance(required, list):
+        for name in required:
+            if name not in args or args[name] is None:
+                return f"缺少必填参数 {name}"
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    for name, value in args.items():
+        if value is None:
+            continue
+        prop = properties.get(name)
+        if not isinstance(prop, dict):
+            continue
+        ptype = prop.get("type")
+        if isinstance(ptype, str) and not _matches_type(value, ptype):
+            return f"参数 {name} 类型应为 {ptype}，实际为 {type(value).__name__}"
+        enum_node = prop.get("enum")
+        if isinstance(enum_node, list) and enum_node and value not in enum_node:
+            allowed = " / ".join(str(v) for v in enum_node)
+            return f"参数 {name} 必须是 {allowed} 之一，实际为 {value!r}"
+    return None
+
+
+def _matches_type(value: Any, ptype: str) -> bool:
+    """基本类型匹配（bool 不算 integer/number；未知类型放行）。"""
+    if ptype == "string":
+        return isinstance(value, str)
+    if ptype == "boolean":
+        return isinstance(value, bool)
+    if ptype == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if ptype == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if ptype == "array":
+        return isinstance(value, list)
+    if ptype == "object":
+        return isinstance(value, dict)
+    return True
+
+
 # ---------- 工具定义 ----------
 
 
@@ -78,6 +137,7 @@ class ToolRegistry:
         settings: Settings,
         approval: Optional[object] = None,
         max_concurrency: int = 4,
+        reflection: Optional[object] = None,
     ) -> None:
         """审批（P4 起）：approval 为 ApprovalSession（或任意真值）表示 HITL 层
         启用——危险工具调用必须携带 decisions（interrupt 收集的用户决策）才执行，
@@ -92,6 +152,8 @@ class ToolRegistry:
         self._default_timeout = settings.tool_timeout_seconds()
         # LSP 诊断（P8）：None 表示诊断整体禁用（对齐 Java lspManager 为 null）
         self._lsp_manager = None
+        # 经验反思采集器（P9）：None 表示不采集触发信号
+        self._reflection = reflection
 
     def set_hitl_active(self, active: bool) -> None:
         """运行期开关 HITL 层（build_react_graph 在 checkpointer 缺失时调用：
@@ -119,6 +181,17 @@ class ToolRegistry:
         if self._lsp_manager is None:
             return EMPTY_REPORT
         return self._lsp_manager.flush_pending_diagnostics()
+
+    # ---------- 经验反思采集（P9） ----------
+
+    def _record_reflection(self, trigger: ReflectionTrigger) -> None:
+        """采集反思触发信号（采集失败静默，绝不影响工具主路径）。"""
+        if self._reflection is None:
+            return
+        try:
+            self._reflection.record(trigger)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------- 注册 ----------
 
@@ -183,6 +256,14 @@ class ToolRegistry:
             if isinstance(res, asyncio.CancelledError):
                 raise res
             if isinstance(res, BaseException):
+                self._record_reflection(
+                    ReflectionTrigger(
+                        kind=TRIGGER_TOOL_FAILURE,
+                        tool_name=name,
+                        error=str(res),
+                        args_skeleton=args_skeleton(call.get("args")),
+                    )
+                )
                 final.append(
                     ToolMessage(
                         content=f"工具执行失败: {res}",
@@ -209,6 +290,14 @@ class ToolRegistry:
             return ToolMessage(
                 content=f"未知工具: {name}", tool_call_id=call.get("id") or "", name=name
             )
+        error = validate_args(tool.parameters, args)
+        if error:
+            # 参数不合法时直接回给 LLM 修正，不进入审批与执行
+            return ToolMessage(
+                content=f"参数校验失败: {error}",
+                tool_call_id=call.get("id") or "",
+                name=name,
+            )
 
         try:
             content = await asyncio.wait_for(
@@ -216,6 +305,14 @@ class ToolRegistry:
             )
         except asyncio.TimeoutError:
             content = f"工具执行超时（>{self._default_timeout}s）: {name}"
+            self._record_reflection(
+                ReflectionTrigger(
+                    kind=TRIGGER_TOOL_FAILURE,
+                    tool_name=name,
+                    error=content,
+                    args_skeleton=args_skeleton(args),
+                )
+            )
         content = truncate_output(content, self._max_output_chars)
         return ToolMessage(content=content, tool_call_id=call.get("id") or "", name=name)
 
@@ -231,12 +328,26 @@ class ToolRegistry:
                     if action == "reject":
                         record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
                         reason = decision.get("reason") or "用户拒绝了此操作"
+                        self._record_reflection(
+                            ReflectionTrigger(
+                                kind=TRIGGER_HITL_REJECT,
+                                tool_name=tool.name,
+                                reason=reason,
+                                args_skeleton=args_skeleton(args),
+                            )
+                        )
                         return f"[HITL] 操作已被拒绝：{reason}"
                     if action == "skip":
                         record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=False)
                         return "[HITL] 操作已被跳过"
                     if action == "modify" and isinstance(decision.get("args"), dict):
                         args = decision["args"]
+                        error = validate_args(tool.parameters, args)
+                        if error:
+                            record_audit(
+                                tool.name, json.dumps(args, ensure_ascii=False), allowed=False
+                            )
+                            return f"参数校验失败: {error}"
                 record_audit(tool.name, json.dumps(args, ensure_ascii=False), allowed=True)
             try:
                 result = tool.func(args)
@@ -244,8 +355,24 @@ class ToolRegistry:
                     result = await result
                 return str(result)
             except PolicyException as e:
+                self._record_reflection(
+                    ReflectionTrigger(
+                        kind=TRIGGER_TOOL_FAILURE,
+                        tool_name=tool.name,
+                        error=f"🛡️ {e}",
+                        args_skeleton=args_skeleton(args),
+                    )
+                )
                 return f"🛡️ {e}"
             except Exception as e:  # noqa: BLE001 —— 对齐 Java：异常转失败文本回给 LLM
+                self._record_reflection(
+                    ReflectionTrigger(
+                        kind=TRIGGER_TOOL_FAILURE,
+                        tool_name=tool.name,
+                        error=str(e),
+                        args_skeleton=args_skeleton(args),
+                    )
+                )
                 return f"工具执行失败: {e}"
 
 

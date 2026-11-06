@@ -73,7 +73,8 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P5 MCP（已交付）** | 官方 `mcp` SDK 2.x（ClientSessionGroup）+ stdio/sse/streamable-http 三 transport + `mcp__{server}__{tool}` 动态注册 + resources 虚拟工具 + `@server:uri` mention + HITL 审批/审计 | 项目级 mcp.json 配真实 stdio server，REPL 内 LLM 经审批调用成功（`mcp__demo__add: 8`）；`uv run pytest` 374 全绿 |
 | **P6 RAG（已交付）** | sqlite-vec（vec0 KNN + JSON 余弦回退）+ LangChain OpenAIEmbeddings + tree-sitter 8 语言 AST 分块 + 语义/关键词混合检索；`search_code` 工具 + `/index` `/search` 命令 | 真实阿里云 embedding 对 Java 源码建索引（2302 块 / sqlite-vec 后端），三条自然语言查询全部精准命中（"压缩会话历史"→maybeCompactHistory、"审批拦截"→hitl 包、"向量检索"→rag 包）；`uv run pytest` 410 全绿 |
 | **P7 Multi-Agent / Skill / web 工具（已交付）** | `AgentOrchestrator`（planner → worker → reviewer 流水线，worker 复用 `build_react_graph` 全量继承工具/budget/HITL/reasoning 流式）+ Skill 三层目录加载 + `load_skill` + `SkillContextBuffer` 下一轮注入 + system prompt 索引段（≤20 个/4KB）+ `web_search`（zhipu/serpapi/searxng 三 provider）+ `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability） | `/team` 真实 LLM 协作跑通两步依赖链（含 reviewer 拒绝→反馈→重试→通过完整生命周期）；`/skill` 项目级 SKILL.md 加载→`load_skill`→buffer 注入全链路生效；web_search 真实 API 错误识别友好提示 + web_fetch 真实抓取 example.com 转 Markdown；`uv run pytest` 526 全绿（新增 116） |
-| **P8 LSP 诊断** | 进程内解析诊断（对齐 Java Phase 17 的轻量形态，非真实 LSP server）：`.py` 用内置 ast、其余复用 P6 tree-sitter 8 语言 grammar 收集 ERROR/MISSING 节点；`write_file` 出口钩子（失败静默不影响写入主路径）+ ReAct 图 agent 节点调 LLM 前 `[LSP 诊断注入]` user message 注入 + renderer 显示；三条路径（ReAct / Plan / team worker）复用 `build_react_graph` 全覆盖；`ASTERCLI_LSP_ENABLED`（默认开）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20） | REPL 内让 Agent 写坏一个 `.py` 文件，下一轮 LLM 输入含 `[LSP 诊断注入]` + `[error]` 行且 Agent 据此修复；`ASTERCLI_LSP_ENABLED=false` 后不再收集；修复文件后 pending 清空；`uv run pytest` 全绿 |
+| **P8 LSP 诊断（已交付）** | 进程内解析诊断（对齐 Java Phase 17 的轻量形态，非真实 LSP server）：`.py` 用内置 ast、其余复用 P6 tree-sitter 8 语言 grammar 收集 ERROR/MISSING 节点；`write_file` 出口钩子（失败静默不影响写入主路径）+ ReAct 图 agent 节点调 LLM 前 `[LSP 诊断注入]` user message 注入 + renderer 显示；三条路径（ReAct / Plan / team worker）复用 `build_react_graph` 全覆盖；`ASTERCLI_LSP_ENABLED`（默认开）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20） | REPL 内让 Agent 写坏一个 `.py` 文件，下一轮 LLM 输入含 `[LSP 诊断注入]` + `[error]` 行且 Agent 据此修复；`ASTERCLI_LSP_ENABLED=false` 后不再收集；修复文件后 pending 清空；`uv run pytest` 全绿 |
+| **P9 反思经验（已交付）** | 三层设计的前两层 + 最小注入：①触发矩阵（工具失败 / HITL 拒绝 / LSP error）→ 独立 LLM 复盘 → 结构化经验；②一经验一 Markdown（项目 `.astercli/experience/` 可 git 共享 + 全局 `~/.astercli-py/experience/`）+ `index.md` + 200 条容量淘汰；③启动期 system prompt 索引段 + 任务级 top-K user message 注入；`/experience list\|search\|show\|delete\|clear\|on\|off`；护栏 `ASTERCLI_REFLECTION_ENABLED`（默认开）/ `SESSION_LIMIT`（默认 3）/ `TIMEOUT_SECONDS`（默认 30）/ `EXPERIENCE_MAX_ENTRIES`（默认 200） | HITL 拒绝并填写原因 → 终端出现 `🧠 已沉淀经验` 且 `.astercli/experience/` 生成 `exp-*.md` + `index.md`；`/experience list/search/show/off/on` 可管理；`uv run pytest` 600 全绿 |
 
 **明确暂不迁移**（后续再议）：微信 iLink 通道、Chrome DevTools/CDP、完整 TUI 视觉（底部状态栏/dock/live thinking 区）、Side-Git 快照、Runtime API、图片输入、Lanterna 降级。
 
@@ -208,3 +209,25 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 **live smoke（真实 API）**：deepseek-v4-flash 一次性模式（管道喂 `a` 过 HITL 审批）让 Agent 写入 `def broken(:` 坏文件 → 终端显示 `🔎 LSP 诊断 - [error] smoke_broken.py:1:12 invalid syntax (ast)` → Agent 下一轮准确复述"line 1, column 12 缺少右括号"并修复为 `def broken():` → 二次写入无新诊断，最终文件 ast.parse 通过。
 
 **与 Java 版的差异**：诊断引擎 JavaParser 单语言 → ast + tree-sitter 多语言；Java 无 renderer 显示链路（injectPendingLspDiagnostics 只进 conversationHistory），Python 版同时 info 显示；Java 开关读系统属性 + 环境变量两级，Python 版只走 Settings 环境变量口径。
+
+## P9 交付记录
+
+**选型**：独立 Markdown 库而非 SQLite / 单一 JSON（对齐 Claude Code 的 memory 目录思路）——一经验一 `exp-<id>.md`（frontmatter 元数据 + 四段正文）、目录内 `index.md` 供人工浏览；项目级目录可直接随 git 共享，单条经验可精确删除。SQLite 留给后续"经验量级真正变大"的 P10+ 再评估。P9 只交付三层设计的**层一 + 层二**，以及层三的最小形态（启动期索引段 + 任务级 top-K）；完整动态检索策略留给 P10。
+
+**交付内容**：
+
+- `experience/models.py`：`ExperienceEntry`（id / category / trigger / lesson / correct_action / evidence / scope / hits / signature；`to_markdown` / `from_markdown` 往返，正文折叠单行防标题破坏段落解析；frontmatter 复用 Skill 的零依赖解析器、延迟导入避免循环）；`ReflectionTrigger`（三类触发信号 + 会话级去重签名 + 证据首行脱敏）；`args_skeleton` 只保留参数 key 与截断值，避免把整个文件内容带进反思提示词
+- `experience/store.py`：项目级 `<root>/.astercli/experience/` + 全局 `~/.astercli-py/experience/`（`ASTERCLI_EXPERIENCE_DIR` 可覆盖）；`save` 同内容签名合并 hits +1、超上限按 `hits × 时效` 淘汰（同分按创建时间淘汰更老条目）、`list_entries` / `get` / `search`（复用长期记忆分词）/ `delete` / `clear` / `index_text` / `context_for_query`，全部 IO 异常静默
+- `experience/reflector.py`：`ReflectionCollector`（工具失败 / HITL 拒绝 / LSP error 三入口，pending 上限 20）；`Reflector.consume` 每轮任务结束后消费触发，独立 LLM 调用（不进入主对话历史），JSON 解析容忍代码块包裹，`confidence=low` / 空 lesson / 解析失败一律丢弃；会话级签名去重 + 次数上限 + 超时 + `/experience off` 会话开关
+- `tools/registry.py`：工具异常、超时、策略拒绝（`🛡️`）、HITL 拒绝四处埋点采集触发（采集失败静默，不影响工具主路径）
+- `lsp/manager.py`：新增 `on_diagnostics` 回调，`write_file` 后把 error 级诊断交给采集器
+- `agent/graph.py`：无需改动——三条路径共享 registry，触发采集自动覆盖 ReAct / Plan / team worker
+- `prompt.py`：`build_system_prompt` / `build_team_prompt` 增加 `experience_index` 段（启动期注入一次，避免 prompt 前缀抖动）
+- `cli/main.py`：装配 `ExperienceStore` / `ReflectionCollector` / `Reflector`（`_rebuild_graph` 时同步 `/model` 切换后的 runtime）；`run_turn` / `run_plan_turn` / `run_team_turn` 轮末 `_reflect_after_turn`；`_task_memory` 与普通轮 user message 增加任务级经验检索；`/experience list|search|show|delete|clear|on|off`、`/clear` 重置会话配额、banner / `/help` 同步
+- 测试 549 → 600（新增 51：models 11 / store 13 / reflector 16 / 触发接线 7 / CLI 展示 4；全中文零网络 fake LLM）
+- 顺带修复：P8 提交误删的 `mcp/config.py#prepare_server`（此前 `tests/mcp/test_config.py` 收集失败且运行期 MCP 配置校验缺失）
+
+**live smoke（真实 API）**：临时项目目录一次性模式请求执行 `ls` → 审批框选择 `n` 并填写原因"我更希望先只看目录结构，不要直接执行 shell 命令" → 终端输出 `🧠 已沉淀经验 [exp-5c33dc40]: 用户希望查看目录结构时，不应直接执行 shell 命令，而应先使用只读的目录/文件列举工具。` → `.astercli/experience/` 生成 `exp-*.md` 与 `index.md`；REPL 内 `/experience list`、`show`、`search`、`off`、`on` 全部按预期响应。
+
+**与 Java 版的差异**：Java 版暂无经验子系统（本模块为 Python 版独立设计，不回写 Java）；长期记忆（手动事实）与经验（自动复盘）是两条独立通道，`AGENTS.md` 中原"不要自动提取事实"约束仍然有效。
+

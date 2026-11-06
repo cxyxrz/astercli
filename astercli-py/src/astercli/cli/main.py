@@ -26,6 +26,13 @@ from ..agent.graph import ainvoke_with_hitl, build_react_graph, make_checkpointe
 from ..agent.orchestrator import AgentOrchestrator
 from ..agent.plan_execute import PlanExecuteAgent
 from ..config import Settings
+from ..experience import (
+    CATEGORY_LABELS,
+    ExperienceStore,
+    ReflectionCollector,
+    Reflector,
+    TRIGGER_LABELS,
+)
 from ..hitl import ApprovalSession, HitlPrompter
 from ..llm.factory import (
     ProviderRuntime,
@@ -129,7 +136,13 @@ class ReplApp:
         self.approval = ApprovalSession()
         self.checkpointer = make_checkpointer()
         self.hitl_prompt = HitlPrompter(getattr(renderer, "_console", None))
-        self.registry = ToolRegistry(settings=settings, approval=self.approval)
+        # 经验反思（P9）：采集器挂到工具层（工具失败 / HITL 拒绝）与 LSP 层（语法 error），
+        # 每轮结束后由 Reflector 统一复盘成 Markdown 经验
+        self.experience = ExperienceStore(self.root, self.settings)
+        self.reflection_collector = ReflectionCollector()
+        self.registry = ToolRegistry(
+            settings=settings, approval=self.approval, reflection=self.reflection_collector
+        )
         register_file_tools(self.registry, self.path_guard)
         register_shell_tools(self.registry, self.path_guard)
         # RAG（P6）：search_code 语义检索（只读不审批）；索引由 /index 惰性建立
@@ -138,7 +151,9 @@ class ReplApp:
         register_web_tools(self.registry, self.settings)
         # LSP 诊断（P8）：write_file 出口钩子收集语法诊断，ReAct 图调 LLM 前
         # 作为 user message 注入（ReAct / Plan / team worker 三路径共享此 registry）
-        self.lsp_manager = LspManager(self.root, self.settings)
+        self.lsp_manager = LspManager(
+            self.root, self.settings, on_diagnostics=self.reflection_collector.lsp_error
+        )
         self.registry.set_lsp_manager(self.lsp_manager)
         # Skill（P7）：三层目录加载 + load_skill 工具 + 注入缓冲区
         self.skill_registry = default_skill_registry(self.root)
@@ -151,9 +166,23 @@ class ReplApp:
         self.runtime = runtime
         self.long_term = LongTermMemory()
         self.project_key = normalize_project_key(self.root)
-        # Skill 索引段进 system prompt（对齐 Java：上限 20 个 / 4KB）
+        # 经验反思器（P9）：会话级开关 / 次数配额 / 去重都在这里；/model 切换后同步 runtime
+        self.reflector = Reflector(
+            runtime,
+            self.experience,
+            self.renderer,
+            self.settings,
+            self.reflection_collector,
+            project_key=self.project_key,
+        )
+        # Skill 索引段 + 经验索引段进 system prompt（经验只注入一次，避免 prompt 前缀抖动）
         self._skill_index = format_index(self.skill_registry.enabled_skills())
-        self.history: list = [SystemMessage(build_system_prompt(self.root, self._skill_index))]
+        self._experience_index = self.experience.index_text()
+        self.history: list = [
+            SystemMessage(
+                build_system_prompt(self.root, self._skill_index, self._experience_index)
+            )
+        ]
         self._next_use_plan = False
         self._next_use_team = False
         self._orchestrator: AgentOrchestrator | None = None
@@ -161,6 +190,7 @@ class ReplApp:
 
     def _rebuild_graph(self) -> None:
         """按当前 runtime 重建压缩器与 ReAct 图 / Plan Agent（/model 切换后复用）。"""
+        self.reflector.set_runtime(self.runtime)
         self.compactor = ConversationHistoryCompactor(self.runtime.client)
         self.trigger_tokens = auto_compact_trigger_tokens(self.runtime.context_window)
         self.graph = build_react_graph(
@@ -199,15 +229,14 @@ class ReplApp:
         return await review_plan(goal, plan, getattr(self.renderer, "_console", None))
 
     def _task_memory(self, description: str) -> str:
-        return (
-            build_memory_context(
-                self.long_term,
-                description,
-                memory_context_tokens(self.runtime.context_window),
-                project_key=self.project_key,
-            )
-            or ""
+        memory = build_memory_context(
+            self.long_term,
+            description,
+            memory_context_tokens(self.runtime.context_window),
+            project_key=self.project_key,
         )
+        experience = self.experience.context_for_query(description) if self.reflector.enabled else ""
+        return "\n\n".join(block for block in (memory, experience) if block)
 
     def _delete_thread(self, thread_id: str) -> None:
         """释放单轮 thread 的 checkpoint（MemorySaver 常驻会话内增长）。"""
@@ -270,7 +299,12 @@ class ReplApp:
                 memory_context_tokens(self.runtime.context_window),
                 project_key=self.project_key,
             )
-            enriched = f"{memory_block}\n\n---\n\n{text}" if memory_block else text
+            # 经验检索注入（P9）：按当前输入召回相关历史复盘，只取少量条目
+            experience_block = (
+                self.experience.context_for_query(text) if self.reflector.enabled else ""
+            )
+            blocks = [b for b in (memory_block, experience_block) if b]
+            enriched = "\n\n---\n\n".join(blocks + [text]) if blocks else text
             # Skill body 前置注入（load_skill 之后一轮生效；对齐 Java prependSkillBodies）
             skill_block = self.skill_buffer.drain()
             if skill_block:
@@ -297,6 +331,14 @@ class ReplApp:
             raise
         self._delete_thread(thread_id)
         self.renderer.usage(budget)
+        await self._reflect_after_turn()
+
+    async def _reflect_after_turn(self) -> None:
+        """轮末复盘：主回答已输出完毕后再消费触发信号，失败绝不影响任务结果。"""
+        try:
+            await self.reflector.consume()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def run_plan_turn(self, text: str) -> None:
         """计划模式单轮：/plan 触发，Planner 出 DAG → 审阅 → 按序执行。"""
@@ -313,6 +355,7 @@ class ReplApp:
         # 计划结果只进历史不重印全文（任务过程已流式输出）
         self.history.append(HumanMessage(text))
         self.history.append(AIMessage(f"[计划结果] {result}"))
+        await self._reflect_after_turn()
 
     async def run_team_turn(self, text: str) -> None:
         """多 Agent 协作单轮：/team 触发，planner → worker → reviewer 流水线。"""
@@ -330,6 +373,7 @@ class ReplApp:
                 checkpointer=self.checkpointer,
                 on_interrupt=self._on_hitl_interrupt,
                 tool_mode=self.settings.tool_mode(),
+                experience_index=self._experience_index,
             )
         try:
             result = await self._orchestrator.run(text)
@@ -339,6 +383,7 @@ class ReplApp:
         # 协作结果进历史（主对话上下文可见，供后续轮次引用）
         self.history.append(HumanMessage(text))
         self.history.append(AIMessage(f"[多 Agent 协作结果] {result}"))
+        await self._reflect_after_turn()
 
     # ---------- 斜杠命令（未知命令在 CLI 层直接报错，不回退给 Agent） ----------
 
@@ -352,9 +397,14 @@ class ReplApp:
         if cmd == "/clear":
             # 清空待注入 Skill buffer，system prompt 用当前 skill 索引段重建（对齐 Java）
             self.skill_buffer.clear()
-            self.history = [SystemMessage(build_system_prompt(self.root, self._skill_index))]
+            self.history = [
+                SystemMessage(
+                    build_system_prompt(self.root, self._skill_index, self._experience_index)
+                )
+            ]
             self.approval.clear_approved_all()
-            self.renderer.info("已清空会话历史（system prompt 已重建，长期记忆保留）。")
+            self.reflector.reset_session()
+            self.renderer.info("已清空会话历史（system prompt 已重建，长期记忆与经验库保留）。")
         elif cmd == "/compact":
             self._compact_history()
         elif cmd == "/plan":
@@ -391,12 +441,15 @@ class ReplApp:
             self._handle_search(payload)
         elif cmd == "/skill":
             self._handle_skill(payload)
+        elif cmd == "/experience":
+            self._handle_experience(payload)
         elif cmd == "/help":
             self.renderer.info(
                 "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · "
                 "/model [provider] 切换 · /tools 工具列表 · /plan [任务] 计划模式 · "
                 "/team [任务] 多 Agent 协作 · "
                 "/skill [list|show|off|on|reload] Skill 管理 · "
+                "/experience [list|search|show|delete|clear|on|off] 经验管理 · "
                 "/mcp [server|resources|restart|disable|enable] MCP · "
                 "/index [路径] 建立代码索引 · /search <query> 语义检索 · "
                 "/save [--global] <事实> 存长期记忆 · /memory list|search|delete|clear · /help 帮助"
@@ -632,12 +685,88 @@ class ReplApp:
                 f"未知的 /skill 子命令: {sub}（可用: list / show / off / on / reload）"
             )
 
+    def _handle_experience(self, payload: str) -> None:
+        """`/experience` 子命令（P9）: list / search / show / delete / clear / on / off。"""
+        parts = payload.split()
+        sub = parts[0].lower() if parts else "list"
+
+        if sub in ("", "list"):
+            scope = _parse_experience_scope(parts[1:])
+            entries = self.experience.list_entries(scope=scope)
+            self.renderer.info(
+                format_experience_entries("🧠 经验列表", entries)
+                + f"\n  {self.reflector.status()}"
+                + "\n  /experience search <关键词> · show <id> · delete <id> · clear · on|off"
+            )
+
+        elif sub == "search":
+            query = " ".join(parts[1:]).strip()
+            if not query:
+                self.renderer.warn("请提供搜索关键词，例如 /experience search 路径")
+                return
+            self.renderer.info(
+                format_experience_entries(f"🔎 经验搜索: {query}", self.experience.search(query))
+            )
+
+        elif sub == "show":
+            entry_id = parts[1] if len(parts) > 1 else ""
+            entry = self.experience.get(entry_id)
+            if entry is None:
+                self.renderer.warn(f"未找到经验: {entry_id or '（未提供 id）'}")
+                return
+            path = self.experience.path_of(entry)
+            self.renderer.info(
+                format_experience_detail(entry, str(path) if path else "")
+            )
+
+        elif sub == "delete":
+            entry_id = parts[1] if len(parts) > 1 else ""
+            if not entry_id:
+                self.renderer.warn("请提供要删除的经验 id，例如 /experience delete exp-abcd1234")
+            elif self.experience.delete(entry_id):
+                self._refresh_experience_index()
+                self.renderer.info(f"🗑️ 已删除经验: {entry_id}")
+            else:
+                self.renderer.warn(f"📭 未找到经验: {entry_id}")
+
+        elif sub == "clear":
+            if len(parts) > 1 and parts[1].lower() == "--all":
+                scope = None
+            else:
+                scope = _parse_experience_scope(parts[1:]) or "project"
+            removed = self.experience.clear(scope)
+            self._refresh_experience_index()
+            label = "全部" if scope is None else ("项目级" if scope == "project" else "全局")
+            self.renderer.info(f"🧹 已清空{label}经验（{removed} 条）")
+
+        elif sub in ("on", "off"):
+            enabled = sub == "on"
+            self.reflector.set_enabled(enabled)
+            state = "开启" if enabled else "关闭"
+            self.renderer.info(f"经验反思已{state}（自动复盘与经验注入同时{state}）")
+
+        else:
+            self.renderer.warn(
+                f"未知的 /experience 子命令: {sub}"
+                "（可用: list / search / show / delete / clear / on / off）"
+            )
+
+    def _refresh_experience_index(self) -> None:
+        """经验库变更后重建 system prompt 索引段（历史首条消息一起更新）。"""
+        self._experience_index = self.experience.index_text()
+        if self.history and isinstance(self.history[0], SystemMessage):
+            self.history[0] = SystemMessage(
+                build_system_prompt(self.root, self._skill_index, self._experience_index)
+            )
+
     def _refresh_skill_index(self) -> list:
         """重建 skill 索引段并更新当前 system prompt（含历史首条消息）。"""
         enabled = self.skill_registry.enabled_skills()
         self._skill_index = format_index(enabled)
         if self.history and isinstance(self.history[0], SystemMessage):
-            self.history[0] = SystemMessage(build_system_prompt(self.root, self._skill_index))
+            self.history[0] = SystemMessage(
+                build_system_prompt(self.root, self._skill_index, self._experience_index)
+            )
         return enabled
 
     # ---------- Banner ----------
@@ -657,7 +786,7 @@ class ReplApp:
         )
         console.print(
             "命令: /model 切换 · /tools 工具 · /plan 计划模式 · /team 多 Agent 协作 · "
-            "/skill 管理 Skill · /compact 压缩 · "
+            "/skill 管理 Skill · /experience 经验 · /compact 压缩 · "
             "/save 与 /memory 记忆 · /index 与 /search 语义检索 · /clear 清空 · /quit 退出",
             style="grey50",
         )
@@ -683,6 +812,47 @@ def format_memory_entries(title: str, entries: list) -> str:
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.timestamp))
         preview = e.content if len(e.content) <= 80 else e.content[:80] + "..."
         lines.append(f"  [{e.id}] ({scope}) {ts} · {preview}")
+    return "\n".join(lines)
+
+
+def _parse_experience_scope(tokens: list) -> str:
+    """解析 /experience 的 ``--project`` / ``--global`` 过滤参数；缺省表示全部。"""
+    for token in tokens:
+        value = token.lower()
+        if value in ("--global", "global"):
+            return "global"
+        if value in ("--project", "project"):
+            return "project"
+    return ""
+
+
+def format_experience_entries(title: str, entries: list) -> str:
+    if not entries:
+        return f"{title}\n  📭 没有经验记录（失败 / 拒绝 / 语法错误后会自动沉淀）"
+    lines = [title]
+    for e in entries:
+        when = time.strftime("%Y-%m-%d", time.localtime(e.created))
+        lesson = e.lesson if len(e.lesson) <= 80 else e.lesson[:80] + "..."
+        lines.append(
+            f"  [{e.id}] ({e.scope} · {e.category} · {e.trigger} · hits={e.hits} · {when}) {lesson}"
+        )
+    return "\n".join(lines)
+
+
+def format_experience_detail(entry, path: str = "") -> str:
+    lines = [
+        f"🧠 经验 {entry.id}",
+        f"   作用域: {entry.scope} · 分类: {CATEGORY_LABELS.get(entry.category, entry.category)}"
+        f" · 触发: {TRIGGER_LABELS.get(entry.trigger, entry.trigger)}",
+        f"   工具: {entry.tool or '（无）'} · 命中: {entry.hits} 次"
+        f" · 创建: {time.strftime('%Y-%m-%d %H:%M', time.localtime(entry.created))}",
+        f"   教训: {entry.lesson}",
+        f"   正确做法: {entry.correct_action or '（未提炼）'}",
+    ]
+    if entry.evidence:
+        lines.append(f"   证据: {entry.evidence}")
+    if path:
+        lines.append(f"   文件: {path}")
     return "\n".join(lines)
 
 

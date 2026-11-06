@@ -171,15 +171,17 @@ async def test_order_preserved_when_later_calls_finish_first():
     registry = make_registry()
 
     async def sleeper(args):
-        await asyncio.sleep(args["path"])
-        return f"slept-{args['path']}"
+        await asyncio.sleep(args["delay"])
+        return f"slept-{args['delay']}"
 
-    register_echo(registry, name="sleeper", func=sleeper)
+    registry.register(
+        "sleeper", "延迟回显", create_parameters(Param("delay", "number", "延迟秒数", True)), sleeper
+    )
     results = await registry.execute_all(
         [
-            call("sleeper", {"path": 0.08}),
-            call("sleeper", {"path": 0.01}),
-            call("sleeper", {"path": 0.05}),
+            call("sleeper", {"delay": 0.08}),
+            call("sleeper", {"delay": 0.01}),
+            call("sleeper", {"delay": 0.05}),
         ]
     )
     assert [r.content for r in results] == ["slept-0.08", "slept-0.01", "slept-0.05"]
@@ -233,15 +235,108 @@ async def test_args_json_string_parsed():
     assert results[0].content == "ok:a.md"
 
 
-async def test_bad_args_json_becomes_empty_dict():
+async def test_bad_args_json_then_validation_failure():
     registry = make_registry()
-
-    def echo_all(args):
-        return f"args={args}"
-
-    register_echo(registry, func=echo_all)
+    register_echo(registry)
     results = await registry.execute_all([{"name": "echo", "args": "{not json", "id": "c1"}])
-    assert results[0].content == "args={}"
+    # 非法 JSON 先归零为 {}，随后被参数校验拦下（不再进入工具内部）
+    assert results[0].content == "参数校验失败: 缺少必填参数 path"
+
+
+# ---------- 参数校验 ----------
+
+
+async def test_missing_required_arg_rejected_before_execution():
+    registry = make_registry()
+    called = []
+
+    def record(args):
+        called.append(args)
+        return "ran"
+
+    register_echo(registry, func=record)
+    results = await registry.execute_all([call("echo", {})])
+    assert results[0].content == "参数校验失败: 缺少必填参数 path"
+    assert called == []
+
+
+async def test_required_arg_with_null_rejected():
+    registry = make_registry()
+    register_echo(registry)
+    results = await registry.execute_all([call("echo", {"path": None})])
+    assert results[0].content == "参数校验失败: 缺少必填参数 path"
+
+
+async def test_wrong_type_arg_rejected():
+    registry = make_registry()
+    register_echo(registry)
+    results = await registry.execute_all([call("echo", {"path": "a.md", "limit": "10"})])
+    assert results[0].content == "参数校验失败: 参数 limit 类型应为 integer，实际为 str"
+
+
+async def test_bool_is_not_integer():
+    registry = make_registry()
+    register_echo(registry)
+    results = await registry.execute_all([call("echo", {"path": "a.md", "limit": True})])
+    assert results[0].content == "参数校验失败: 参数 limit 类型应为 integer，实际为 bool"
+
+
+async def test_enum_arg_rejected():
+    registry = make_registry()
+    register_echo(registry)
+    results = await registry.execute_all([call("echo", {"path": "a.md", "mode": "c"})])
+    assert results[0].content == "参数校验失败: 参数 mode 必须是 a / b 之一，实际为 'c'"
+
+
+async def test_optional_args_and_none_pass_validation():
+    registry = make_registry()
+    register_echo(registry)
+    results = await registry.execute_all(
+        [call("echo", {"path": "a.md", "limit": None, "mode": "a", "extra": "任意"})]
+    )
+    assert results[0].content == "ok:a.md"
+
+
+async def test_unknown_schema_construct_passes():
+    # MCP 的 anyOf / $ref 等非基本类型不校验，避免误伤外部 server
+    registry = make_registry()
+    registry.register(
+        "mcp_like",
+        "外部工具",
+        {"type": "object", "properties": {"x": {"anyOf": [{"type": "string"}]}}, "required": ["x"]},
+        lambda args: "mcp-ok",
+        dangerous=True,
+    )
+    results = await registry.execute_all([call("mcp_like", {"x": 123})])
+    assert results[0].content == "mcp-ok"
+
+
+async def test_modify_with_missing_required_arg_rejected():
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})],
+        decisions={"call-echo": {"action": "modify", "args": {"limit": 5}}},
+    )
+    assert results[0].content == "参数校验失败: 缺少必填参数 path"
+
+
+async def test_modify_with_wrong_type_rejected():
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all(
+        [call("echo", {"path": "x"})],
+        decisions={"call-echo": {"action": "modify", "args": {"path": "modified", "limit": "5"}}},
+    )
+    assert results[0].content == "参数校验失败: 参数 limit 类型应为 integer，实际为 str"
+
+
+async def test_invalid_args_skip_hitl_prompt():
+    # 参数校验先于审批：参数不合法时不进入审批分支
+    registry = make_registry(approval=ApprovalSession())
+    register_echo(registry, dangerous=True)
+    results = await registry.execute_all([call("echo", {})])
+    assert results[0].content == "参数校验失败: 缺少必填参数 path"
 
 
 # ---------- HITL 审批（决策制：interrupt 收集用户决策后经 decisions 传入） ----------

@@ -16,7 +16,7 @@
 - `ASTER.md` 是 AsterCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
 - Banner 版本：`v16.1.0`，Maven 产物：`astercli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
-- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP + P6 RAG + P7 Multi-Agent/Skill/web + P8 LSP 诊断 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
+- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP + P6 RAG + P7 Multi-Agent/Skill/web + P8 LSP 诊断 + P9 反思经验 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
 
 ## 运行前提
 
@@ -61,6 +61,8 @@ Python 版 P6 起支持 RAG：tree-sitter 八语言 AST 符号分块（Java 版�
 Python 版 P7 起支持 Multi-Agent / Skill / web 工具：`/team [任务]` 三角色协作（planner 单轮出计划 JSON → worker 复用 ReAct 图全量继承工具/budget/HITL/reasoning 流式 → reviewer 审查，不通过带反馈重试 ≤2 次；依赖批次内顺序执行，与 Java Worker 池并行为已知差异）；Skill 三层目录（user `~/.astercli-py/skills` + project `.astercli/skills`，同名项目级整体覆盖；Java builtin 内置层暂无 Python 资产）+ `load_skill` 工具经 `SkillContextBuffer`（LRU≤3）下一轮前置注入 + system prompt 索引段（≤20 个/4KB）+ `/skill list|show|off|on|reload`；`web_search`（zhipu/serpapi/searxng 三 provider，`SEARCH_PROVIDER` 显式或按 Key 自动选择）与 `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability 转 Markdown）均只读不审批；step-3.7-flash 下转调 StepSearch MCP 的偏好不迁移。
 
 Python 版 P8 起支持 LSP 诊断：进程内解析（非真实 LSP server，对齐 Java Phase 17 轻量形态）——`.py` 走内置 ast、其余复用 P6 tree-sitter 语法树（比 Java 仅 JavaParser 单 .java 覆盖更宽）；`write_file` 出口钩子收集（异常静默不影响写入主路径），ReAct/Plan/team 三路径调 LLM 前把 pending 诊断作为 `[LSP 诊断注入]` user message 注入并 renderer 显示、注入消息跨轮保留；`ASTERCLI_LSP_ENABLED`（默认开，仅显式 false 关闭）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20）可调。
+
+Python 版 P9 起支持反思经验（Java 版无对应模块，属 Python 独立设计）：三类触发（工具失败 / 超时 / 策略拒绝、HITL 用户拒绝、LSP error 级诊断）由 registry 出口与 LSP 回调采集，轮末用独立 LLM 调用提炼 `lesson / correct_action / category / confidence`，按内容签名去重合并（hits +1）；落盘为独立 Markdown——项目级 `<项目根>/.astercli/experience/exp-*.md`（可 git 共享）+ 全局 `~/.astercli-py/experience/`（`ASTERCLI_EXPERIENCE_DIR` 可覆盖），目录内维护 `index.md`、单目录上限 200 条按 hits × 时效淘汰；注入走启动期 system prompt 索引段（一次）+ 每轮任务级 top-K user message；`/experience list|search|show|delete|clear|on|off` 管理；护栏 `ASTERCLI_REFLECTION_ENABLED`（默认开）/ `ASTERCLI_REFLECTION_SESSION_LIMIT`（默认 3）/ `ASTERCLI_REFLECTION_TIMEOUT_SECONDS`（默认 30）/ `ASTERCLI_EXPERIENCE_MAX_ENTRIES`（默认 200），解析失败 / 低置信度 / LLM 异常一律丢弃且不影响主任务。
 
 ## 架构概览
 
@@ -146,6 +148,8 @@ src/main/java/com/astercli/
 ### Memory
 
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
+- 经验（Python P9）与长期记忆是两条独立通道：经验是失败信号的自动复盘（工具失败 / HITL 拒绝 / LSP error），长期记忆是手动保存的稳定事实；自动沉淀经验不违反"不自动提取事实"约束
+- 经验必须可审计可删除：`/experience list|search|show|delete|clear`，`/experience off` 同时关闭自动复盘与经验注入
 - `ASTER.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `ASTER.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
@@ -220,6 +224,8 @@ src/main/java/com/astercli/
 ### 5.4 改 HITL/策略 → `policy/` + ToolRegistry + HitlToolRegistry + 提示词 + `.env.example` + 文档 + 测试
 
 ### 5.5 改 MCP → `mcp/` + ToolRegistry + HITL + AuditLog + 提示词 + 文档 + 测试
+
+### 5.6 改经验反思（Python `astercli-py/`）→ `experience/` + `tools/registry.py` 埋点 + `lsp/manager.py` 回调 + `prompt.py` 注入 + `cli/main.py` 轮末消费与命令 + `.env.example` + 文档 + 测试
 
 ### 6. 不提交 `.env` / 真实 API Key / `target/` 产物
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import ast
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 from ..config import Settings
 from .diagnostics import LspDiagnostic, LspDiagnosticReport, LspSeverity
@@ -34,9 +34,12 @@ class LspManager:
         self,
         project_root: Optional[Union[str, Path]] = None,
         settings: Optional[Settings] = None,
+        on_diagnostics: Optional[Callable[[LspDiagnostic], None]] = None,
     ) -> None:
         self._settings = settings or Settings(load_files=False)
         self._pending: Dict[Path, List[LspDiagnostic]] = {}
+        # P9：诊断回调（经验反思采集器）；异常一律静默，不影响诊断主路径
+        self._on_diagnostics = on_diagnostics
         self.set_project_path(project_root)
 
     # ---------- 对齐 Java setProjectPath ----------
@@ -72,6 +75,7 @@ class LspManager:
                     return
                 diagnostics = _diagnose_tree_sitter(display_path, parser, file, self._project_root)
             self._replace(file, diagnostics)
+            self._notify(diagnostics)
             log.debug("LSP post-edit diagnostics for %s: %s", file, len(diagnostics))
         except Exception:  # noqa: BLE001 —— 对齐 Java：诊断失败不影响主路径
             log.debug("LSP post-edit hook failed for %s", edited_file, exc_info=True)
@@ -103,6 +107,16 @@ class LspManager:
     def _clear(self, file: Optional[Path]) -> None:
         if file is not None:
             self._pending.pop(Path(file).resolve(), None)
+
+    def _notify(self, diagnostics: List[LspDiagnostic]) -> None:
+        """把新诊断交给订阅方（P9 经验反思）；单个回调失败不影响其余诊断。"""
+        if self._on_diagnostics is None:
+            return
+        for diagnostic in diagnostics:
+            try:
+                self._on_diagnostics(diagnostic)
+            except Exception:  # noqa: BLE001
+                log.debug("LSP 诊断回调失败", exc_info=True)
 
 
 # ---------- 诊断引擎 ----------

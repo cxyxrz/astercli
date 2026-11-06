@@ -227,6 +227,7 @@ class AgentOrchestrator:
         checkpointer=None,
         on_interrupt: Optional[Callable] = None,
         tool_mode: Optional[str] = None,
+        experience_index: str = "",
     ) -> None:
         self._runtime = runtime
         self._registry = registry
@@ -239,9 +240,9 @@ class AgentOrchestrator:
         skill_index = (
             format_index(skill_registry.enabled_skills()) if skill_registry is not None else ""
         )
-        self._planner_prompt = build_team_prompt("planner", project_root, skill_index)
-        self._worker_prompt = build_team_prompt("worker", project_root, skill_index)
-        self._reviewer_prompt = build_team_prompt("reviewer", project_root, skill_index)
+        self._planner_prompt = build_team_prompt("planner", project_root, skill_index, experience_index)
+        self._worker_prompt = build_team_prompt("worker", project_root, skill_index, experience_index)
+        self._reviewer_prompt = build_team_prompt("reviewer", project_root, skill_index, experience_index)
 
         # worker 复用 ReAct 图：工具执行 / budget 兜底 / reasoning 流式 / HITL 审批全量继承
         self._worker_graph = build_react_graph(

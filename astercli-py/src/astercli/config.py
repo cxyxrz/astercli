@@ -145,6 +145,25 @@ class Settings:
         """注入上限（对齐 Java 默认 20；非正数回退默认）。"""
         return _positive_int(self.get("ASTERCLI_LSP_MAX_DIAGNOSTICS"), 20)
 
+    # ---------- 经验反思（P9） ----------
+
+    def reflection_enabled(self) -> bool:
+        """反思总开关：对齐 LSP 语义，仅显式 false（忽略大小写）关闭。"""
+        raw = self.get("ASTERCLI_REFLECTION_ENABLED")
+        return (raw or "").strip().lower() != "false"
+
+    def reflection_session_limit(self) -> int:
+        """单会话最多反思次数（按尝试计数，默认 3，防止失败风暴烧 token）。"""
+        return _positive_int(self.get("ASTERCLI_REFLECTION_SESSION_LIMIT"), 3)
+
+    def reflection_timeout_seconds(self) -> int:
+        """单次反思 LLM 调用超时（默认 30 秒，超时直接丢弃）。"""
+        return _positive_int(self.get("ASTERCLI_REFLECTION_TIMEOUT_SECONDS"), 30)
+
+    def experience_max_entries(self) -> int:
+        """单个经验目录条目上限（默认 200，超额按 hits × 时效淘汰）。"""
+        return _positive_int(self.get("ASTERCLI_EXPERIENCE_MAX_ENTRIES"), 200)
+
 
 def _positive_int(raw: Optional[str], default: int) -> int:
     if raw is None or not raw.strip():

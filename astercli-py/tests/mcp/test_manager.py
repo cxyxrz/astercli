@@ -305,7 +305,7 @@ class TestCallToolWithHitl:
         approval = ApprovalSession()
         manager, registry = make_manager(tmp_path, monkeypatch, [FakeSession()], approval=approval)
         manager.startup()
-        calls = [{"name": "mcp__srv__add", "args": {}, "id": "c1"}]
+        calls = [{"name": "mcp__srv__add", "args": {"a": 3, "b": 5}, "id": "c1"}]
         messages = asyncio.run(registry.execute_all(calls, {"c1": {"action": "reject", "reason": "不想执行"}}))
         assert "[HITL] 操作已被拒绝" in messages[0].content
 
@@ -313,7 +313,7 @@ class TestCallToolWithHitl:
         approval = ApprovalSession()
         manager, registry = make_manager(tmp_path, monkeypatch, [FakeSession()], approval=approval)
         manager.startup()
-        calls = [{"name": "mcp__srv__add", "args": {}, "id": "c1"}]
+        calls = [{"name": "mcp__srv__add", "args": {"a": 3, "b": 5}, "id": "c1"}]
         messages = asyncio.run(registry.execute_all(calls, None))
         assert "[HITL] 未收到审批" in messages[0].content
 

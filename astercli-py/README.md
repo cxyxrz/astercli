@@ -1,10 +1,10 @@
-# AsterCLI Python 重写版（P1–P7）
+# AsterCLI Python 重写版（P1–P9）
 
 用 **LangChain + LangGraph** 重写 Java 版 AsterCLI 的核心路径，与仓库根的 Java 版并行演进：
 
 - Java 版 = 生产版本，Python 侧改动不回写 Java 代码
 - 分期路线图：仓库 `.trae/documents/python-langchain-rewrite.md`
-- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）
+- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）、P9（反思经验：三类触发自动复盘 + Markdown 归档 + `/experience`）
 
 ## 运行
 
@@ -19,13 +19,14 @@ uv run pytest                            # 全量单测
 
 ## REPL 命令
 
-- `/quit` `/exit` 退出；`/clear` 清空会话历史（长期记忆保留，审批"全部放行"名单清空）；`/model` 查看/切换 provider；`/tools` 查看工具列表（`*` 标记需审批）
+- `/quit` `/exit` 退出；`/clear` 清空会话历史（长期记忆与经验库保留，审批"全部放行"名单与会话反思配额重置）；`/model` 查看/切换 provider；`/tools` 查看工具列表（`*` 标记需审批）
 - `/compact` 手动压缩当前会话历史（保留最近 1 个轮次，早期轮次摘要为"[已压缩的历史对话摘要]"）
 - `/save [内容|--global 内容]` 保存长期记忆（默认项目级作用域；`--global` 为跨项目全局）
 - `/memory status|list|search <关键词>|delete <id>|clear` 长期记忆管理
 - `/plan [任务]` 计划模式：无参数时下一条输入进入规划；带参数直接规划该任务
 - `/team [任务]` 多 Agent 协作：无参数时下一条输入进入团队协作；带参数直接协作该任务
 - `/skill [list|show <name>|off <name>|on <name>|reload]` Skill 管理（三层目录加载，banner 显示启用数）
+- `/experience [list|search <关键词>|show <id>|delete <id>|clear [--global|--all]|on|off]` 经验管理（P9；`list` 支持 `--project` / `--global` 过滤）
 - `/mcp [status|resources <server>|restart <server>|disable <server>|enable <server>]` MCP server 管理
 - `/index [路径]` 对项目（或项目内子目录）建立/重建 RAG 向量索引
 - `/search <query>` 不经过 LLM 直接做语义混合检索
@@ -46,6 +47,7 @@ uv run pytest                            # 全量单测
 
 - `y`/Enter 批准本次；`a` 批准且本会话同工具后续自动放行（`/clear` 重置）；`n` 拒绝（可填原因，回灌给 LLM 调整方案）；`s` 跳过；`m` 输入修改后的 JSON 参数再执行
 - 拦截顺序对齐 Java：HITL → ToolRegistry → PathGuard/CommandGuard
+- 工具参数在执行前按 Schema 做浅层校验（required 齐全 / 基本类型 / enum），失败直接以「参数校验失败: …」文本回给 LLM 修正，不进入审批与执行；`m` 修改后的参数走同一校验（Java 仅在 modify 提交时校验 required）
 - fail-safe：非法输入连续 5 次、决策缺失（interrupt 丢失）、输入流关闭（非交互管道）一律保守拒绝，绝不默认放行
 - 审批挂起依赖 checkpointer（`make_checkpointer()`：MemorySaver + pickle 兜底序列化）；未提供时审批整体禁用，危险工具直接执行（对齐 Java"HITL 未启用行为与父类相同"）
 
@@ -116,6 +118,16 @@ uv run pytest                            # 全量单测
 - **web_fetch(url, max_chars=8000)**：`NetworkPolicy` SSRF 围栏（仅 http/https + DNS 解析后拒绝环回/内网/链路本地地址 + 60s/30 次限流）→ 流式抓取（5MB 上限）→ BeautifulSoup 极简 readability 转 Markdown（标题/正文/表格/代码块/相对链接补全）；SPA 空正文提示改用 web_search
 - 两者均只读不审批；失败转文本回给 LLM 自行调整
 
+## 反思经验（P9）
+
+三层设计交付前两层 + 最小注入（完整动态检索策略留 P10）：
+
+- **层一 触发与复盘**：三类信号自动进入反思队列——工具失败（异常 / 超时 / 策略拒绝）、HITL 用户拒绝（含拒绝原因）、LSP error 级诊断；每轮任务结束后用一次**独立 LLM 调用**提炼 `lesson / correct_action / category / confidence` 四项 JSON，不进入主对话历史
+- **层二 持久归档**：一经验一 Markdown——项目级 `<项目根>/.astercli/experience/exp-<id>.md`（可随 git 共享）+ 全局 `~/.astercli-py/experience/`（`ASTERCLI_EXPERIENCE_DIR` 可覆盖）；frontmatter 存 category/trigger/scope/created/hits/signature，正文四段（教训 / 正确做法 / 触发信号 / 证据）；目录内维护 `index.md`；单目录超 200 条按 `hits × 时效` 淘汰；同内容经验合并为 hits +1
+- **层三 最小注入**：会话启动时把经验索引段注入 system prompt（一次，避免前缀抖动）；每轮按当前输入检索 top-K 相关经验前置注入 user message（普通轮 + Plan 任务级均覆盖）
+- **护栏**：`ASTERCLI_REFLECTION_ENABLED`（默认开，仅显式 false 关闭）/ `ASTERCLI_REFLECTION_SESSION_LIMIT`（默认 3，按尝试计数）/ `ASTERCLI_REFLECTION_TIMEOUT_SECONDS`（默认 30）/ `ASTERCLI_EXPERIENCE_MAX_ENTRIES`（默认 200）；会话内同触发签名只反思一次；`confidence=low`、空 lesson、JSON 解析失败、LLM 异常一律丢弃，绝不影响主任务；`/experience off` 同时关闭复盘与注入，`/clear` 重置会话配额但保留经验库
+- **长期记忆 vs 经验**：`/save` 保存的是**事实**（手动、稳定、跨会话）；经验是**自动复盘**的操作教训（按失败信号沉淀、可删除、可命中累加），两条通道互不替代
+
 ## 与 Java 版的已知差异
 
 - `grep_code` 暂为纯 Python 扫描引擎（Java 版优先 ripgrep，后续对齐）
@@ -127,3 +139,4 @@ uv run pytest                            # 全量单测
 - RAG 分块/分词/存储与 Java 的差异：tree-sitter 八语言符号分块（Java 仅 JavaParser 单语言）、查询分词零依赖（Java jieba）、per-project 独立库（Java 单库混多项目）、关键词底分 0.15（Java 0.3，实测修正防关键词噪音压过语义命中）
 - Multi-Agent 依赖批次内顺序执行（Java Worker 池并行）；Java builtin（jar 内置）skill 层暂无 Python 内置资产；web_search 不迁移 step-3.7-flash 下转调 StepSearch MCP 的偏好
 - LSP 诊断引擎差异：`.py` 内置 ast + 其余 tree-sitter 多语言（Java 仅 JavaParser 单 .java）；诊断同时进 renderer 显示（Java 只进 conversationHistory）；开关仅环境变量口径（Java 另支持系统属性）
+- 经验子系统为 Python 版独立设计（Java 暂无对应模块，不回写 Java）；存储选 Markdown 文件而非 SQLite / JSON；长期记忆与经验互不替代（事实手动存、经验自动沉淀）

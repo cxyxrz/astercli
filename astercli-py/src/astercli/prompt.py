@@ -133,7 +133,7 @@ TEAM_REVIEWER_PROMPT = """你是 AsterCLI 多 Agent 团队的检查者（reviewe
 
 
 
-def build_system_prompt(project_root: Path, skill_index: str = "") -> str:
+def build_system_prompt(project_root: Path, skill_index: str = "", experience_index: str = "") -> str:
     now = datetime.now().astimezone()
     tz_name = getattr(now.tzinfo, "tzname", lambda *_: None)(now) or "UTC"
     lines = [
@@ -161,10 +161,15 @@ def build_system_prompt(project_root: Path, skill_index: str = "") -> str:
     if skill_index.strip():
         lines.append("")
         lines.append(skill_index.strip())
+    if experience_index.strip():
+        lines.append("")
+        lines.append(experience_index.strip())
     return "\n".join(lines)
 
 
-def build_team_prompt(role: str, project_root: Path, skill_index: str = "") -> str:
+def build_team_prompt(
+    role: str, project_root: Path, skill_index: str = "", experience_index: str = ""
+) -> str:
     """/team 三角色提示词：角色指令 + ASTER.md 项目记忆 + Skill 索引段。
 
     role ∈ {"planner", "worker", "reviewer"}；对齐 Java SubAgent.getSystemPrompt
@@ -184,6 +189,9 @@ def build_team_prompt(role: str, project_root: Path, skill_index: str = "") -> s
     if skill_index.strip():
         lines.append("")
         lines.append(skill_index.strip())
+    if experience_index.strip():
+        lines.append("")
+        lines.append(experience_index.strip())
     return "\n".join(lines)
 
 
