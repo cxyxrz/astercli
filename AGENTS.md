@@ -52,7 +52,7 @@ uv run pytest            # Python 版测试（549 个）
 
 Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。
 
-Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / Ctrl+O 展开 / ESC 取消 / I 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。
+Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / Ctrl+O 展开 / ESC 取消 / I 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。工具参数在执行前按 Schema 做浅层校验（required / 基本类型 / enum），命令可选 OS 级沙箱（`ASTERCLI_COMMAND_SANDBOX`，与 Java 同名同语义，fail-closed）。
 
 Python 版 P5 起支持 MCP：基于官方 `mcp` SDK 2.x（ClientSessionGroup 会话池 + 后台线程常驻 event loop，会话跨每轮 `asyncio.run()` 存活）；配置合并用户级 `~/.astercli-py/mcp.json` 与项目级 `.astercli/mcp.json`（与 Java 隔离的用户级目录）；动态工具 `mcp__{server}__{tool}` 一律 dangerous 走 P4 审批通道；resources 虚拟工具、`@server:uri` mention 展开、`/mcp` 管理命令（status/resources/restart/disable/enable）已对齐；HTTP/SSE transport 由官方 SDK 保证（单测仅 stdio 集成）。
 

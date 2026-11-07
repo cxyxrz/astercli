@@ -48,6 +48,7 @@ uv run pytest                            # 全量单测
 - `y`/Enter 批准本次；`a` 批准且本会话同工具后续自动放行（`/clear` 重置）；`n` 拒绝（可填原因，回灌给 LLM 调整方案）；`s` 跳过；`m` 输入修改后的 JSON 参数再执行
 - 拦截顺序对齐 Java：HITL → ToolRegistry → PathGuard/CommandGuard
 - 工具参数在执行前按 Schema 做浅层校验（required 齐全 / 基本类型 / enum），失败直接以「参数校验失败: …」文本回给 LLM 修正，不进入审批与执行；`m` 修改后的参数走同一校验（Java 仅在 modify 提交时校验 required）
+- 可选 OS 级命令沙箱（与 Java 同名同语义）：`ASTERCLI_COMMAND_SANDBOX=true` 后 `execute_command` 子进程在写围栏内运行——仅项目根 / `/tmp` / `ASTERCLI_SANDBOX_WRITABLE_PATHS` 可写，HOME 只读；macOS 用 `sandbox-exec`，Linux 需 `bubblewrap`，`ASTERCLI_SANDBOX_ALLOW_NET=false` 断网。开启但平台/工具不可用时 fail-closed 拒绝执行，不静默降级
 - fail-safe：非法输入连续 5 次、决策缺失（interrupt 丢失）、输入流关闭（非交互管道）一律保守拒绝，绝不默认放行
 - 审批挂起依赖 checkpointer（`make_checkpointer()`：MemorySaver + pickle 兜底序列化）；未提供时审批整体禁用，危险工具直接执行（对齐 Java"HITL 未启用行为与父类相同"）
 

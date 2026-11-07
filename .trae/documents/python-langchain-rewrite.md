@@ -231,3 +231,13 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 
 **与 Java 版的差异**：Java 版暂无经验子系统（本模块为 Python 版独立设计，不回写 Java）；长期记忆（手动事实）与经验（自动复盘）是两条独立通道，`AGENTS.md` 中原"不要自动提取事实"约束仍然有效。
 
+## 补充交付：工具参数校验 + 命令沙箱
+
+**参数校验**：`tools/registry.py` 新增 `validate_args(parameters, args)`——按工具 Schema 校验 required 齐全（`null` 视同缺失）、顶层基本类型（`bool` 不算 integer/number）、enum 命中；未知 Schema 构造（MCP 的 `anyOf` / `$ref`）与无 `properties` 的 Schema 一律放行，避免误伤外部 server。`_run_one` 在未知工具检查之后、审批与执行之前拦截，失败返回 `参数校验失败: …` 文本让 LLM 自行修正，不弹审批框；HITL `modify` 替换参数后复用同一函数复校并记 denied 审计（Java 仅在 modify 提交时校验 required）。
+
+**命令沙箱**：新增 `policy/sandbox.py#CommandSandbox`，对齐 Java `policy.CommandSandbox`——`ASTERCLI_COMMAND_SANDBOX=true|on` 开启后 `execute_command` 把命令包装成 `sandbox-exec -p <Seatbelt profile> bash -c`（macOS）或 `bwrap --ro-bind / / + --bind 白名单 …`（Linux）；未开启时保持原 `shell=True` 路径不变，开启但平台/工具不可用时 fail-closed 抛 `PolicyException`（与黑名单共用策略拒绝出口）。配置同 Java：`ASTERCLI_SANDBOX_WRITABLE_PATHS`（逗号分隔、`~` 展开）、`ASTERCLI_SANDBOX_ALLOW_NET`（默认 true，仅显式 false 断网）。Sandbox 在 `cli/main.py` 装配并注入 `register_shell_tools`。
+
+**测试** 600 → 610（参数校验新增 10，含 3 个既有用例随新行为调整）→ 637（沙箱新增 27，纯函数断言 profile / argv，不真正执行沙箱）。
+
+**live smoke（macOS 真机）**：开启沙箱后 `echo hi` 正常、项目根与 `/tmp` 写入成功、写 `~/astercli-sbx-should-fail.txt` 被内核拒绝（`Operation not permitted`）。
+

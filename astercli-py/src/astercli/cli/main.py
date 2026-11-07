@@ -52,7 +52,7 @@ from ..memory import (
     normalize_project_key,
 )
 from ..plan import Planner
-from ..policy import PathGuard
+from ..policy import CommandSandbox, PathGuard
 from ..prompt import build_system_prompt
 from ..skill import (
     SkillContextBuffer,
@@ -144,7 +144,13 @@ class ReplApp:
             settings=settings, approval=self.approval, reflection=self.reflection_collector
         )
         register_file_tools(self.registry, self.path_guard)
-        register_shell_tools(self.registry, self.path_guard)
+        # 第三层命令沙箱：开启后 execute_command 子进程在写围栏内运行
+        # （未开启时 wrap 返回裸 bash，行为与之前完全一致）
+        register_shell_tools(
+            self.registry,
+            self.path_guard,
+            sandbox=CommandSandbox.from_settings(self.settings),
+        )
         # RAG（P6）：search_code 语义检索（只读不审批）；索引由 /index 惰性建立
         register_rag_tool(self.registry, self.root)
         # Web（P7）：web_search / web_fetch（只读不审批；provider 未配置时返回配置提示）
