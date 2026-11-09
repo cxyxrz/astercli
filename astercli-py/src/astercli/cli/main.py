@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,7 @@ from ..agent.graph import ainvoke_with_hitl, build_react_graph, make_checkpointe
 from ..agent.orchestrator import AgentOrchestrator
 from ..agent.plan_execute import PlanExecuteAgent
 from ..config import Settings
+from ..dream import DreamRunner, DreamWorker, Proposal, SessionLog, describe_op
 from ..experience import (
     CATEGORY_LABELS,
     ExperienceStore,
@@ -172,6 +174,15 @@ class ReplApp:
         self.runtime = runtime
         self.long_term = LongTermMemory()
         self.project_key = normalize_project_key(self.root)
+        # AutoDream（P10）：每轮最小会话转写（用户输入 / 工具名 / 最终回答），
+        # 不落工具参数与完整输出；后台整合由 dream runner 在后续里程碑消费
+        self.session_log = SessionLog(self.project_key, self.settings)
+        # 长期记忆是单文件 JSON：/save、/memory 与 dream 应用共用一把锁，
+        # 保证"读 - 改 - 写"不被后台线程打断（临界区很短）
+        self.memory_lock = threading.RLock()
+        self.dream_runner = DreamRunner(
+            self.project_key, self.settings, session_log=self.session_log
+        )
         # 经验反思器（P9）：会话级开关 / 次数配额 / 去重都在这里；/model 切换后同步 runtime
         self.reflector = Reflector(
             runtime,
@@ -193,6 +204,27 @@ class ReplApp:
         self._next_use_team = False
         self._orchestrator: AgentOrchestrator | None = None
         self._rebuild_graph()
+        # AutoDream（P10）：启动期只做廉价门检查，通过后守护线程后台整合；
+        # 完成通知入队，下一次输入前由 REPL 统一打印（不抢 prompt_toolkit 输入区）
+        self.dream_worker = DreamWorker(
+            self.dream_runner,
+            self.settings,
+            self.session_log,
+            self.long_term,
+            self.experience,
+            self._dream_runtime,
+            project_key=self.project_key,
+            memory_lock=self.memory_lock,
+        )
+        self.dream_worker.start()
+
+    def _dream_runtime(self):
+        """dream 专用 runtime：ASTERCLI_DREAM_MODEL 覆盖当前 provider 的模型。"""
+        override = self.settings.dream_model()
+        if not override:
+            return self.runtime
+        dream_runtime = create_client(self.runtime.provider, self.settings, model=override)
+        return dream_runtime or self.runtime
 
     def _rebuild_graph(self) -> None:
         """按当前 runtime 重建压缩器与 ReAct 图 / Plan Agent（/model 切换后复用）。"""
@@ -259,6 +291,7 @@ class ReplApp:
 
         session: PromptSession = PromptSession()
         while True:
+            self._flush_dream_notices()
             try:
                 text = session.prompt("* ")
             except (KeyboardInterrupt, EOFError):
@@ -290,6 +323,8 @@ class ReplApp:
     # ---------- 单轮执行 ----------
 
     async def run_turn(self, text: str) -> None:
+        # 会话转写：先记用户原始输入（后续 enrich 不改变已记录内容）
+        self.session_log.record_user(text)
         # MCP resource mention 展开（@server:uri → <resource> 块；失败降级错误块）
         text = expand_mentions(text, self.mcp)
         snapshot = list(self.history)
@@ -327,9 +362,13 @@ class ReplApp:
                 config,
                 self._on_hitl_interrupt,
             )
+            consumed = len(self.history)
             self.history[:] = result["messages"]
             # resume 恢复后 result["budget"] 是反序列化副本，优先取回（token 记账完整）
             budget = result.get("budget") or budget
+            new_messages = result["messages"][consumed:]
+            self.session_log.record_tools(_tool_names(new_messages))
+            self.session_log.record_assistant(_last_ai_text(result["messages"]))
         except (KeyboardInterrupt, asyncio.CancelledError):
             # 取消当前任务：回滚本轮半途历史，不污染下一轮
             self.history[:] = snapshot
@@ -348,6 +387,7 @@ class ReplApp:
 
     async def run_plan_turn(self, text: str) -> None:
         """计划模式单轮：/plan 触发，Planner 出 DAG → 审阅 → 按序执行。"""
+        self.session_log.record_user(text)
         text = expand_mentions(text, self.mcp)
         # Skill body 前置注入（计划任务执行者与主 Agent 共用同一语义）
         skill_block = self.skill_buffer.drain()
@@ -361,10 +401,12 @@ class ReplApp:
         # 计划结果只进历史不重印全文（任务过程已流式输出）
         self.history.append(HumanMessage(text))
         self.history.append(AIMessage(f"[计划结果] {result}"))
+        self.session_log.record_assistant(str(result))
         await self._reflect_after_turn()
 
     async def run_team_turn(self, text: str) -> None:
         """多 Agent 协作单轮：/team 触发，planner → worker → reviewer 流水线。"""
+        self.session_log.record_user(text)
         text = expand_mentions(text, self.mcp)
         if self._orchestrator is None:
             self._orchestrator = AgentOrchestrator(
@@ -389,7 +431,16 @@ class ReplApp:
         # 协作结果进历史（主对话上下文可见，供后续轮次引用）
         self.history.append(HumanMessage(text))
         self.history.append(AIMessage(f"[多 Agent 协作结果] {result}"))
+        self.session_log.record_assistant(str(result))
         await self._reflect_after_turn()
+
+    def _flush_dream_notices(self) -> None:
+        """输入前统一输出后台 dream 结果；若记忆库被改写则重建经验索引段。"""
+        for notice in self.dream_worker.drain_notices():
+            self.renderer.info(notice)
+        if self.dream_worker.dirty:
+            self.dream_worker.clear_dirty()
+            self._refresh_experience_index()
 
     # ---------- 斜杠命令（未知命令在 CLI 层直接报错，不回退给 Agent） ----------
 
@@ -449,6 +500,8 @@ class ReplApp:
             self._handle_skill(payload)
         elif cmd == "/experience":
             self._handle_experience(payload)
+        elif cmd == "/dream":
+            self._handle_dream(payload)
         elif cmd == "/help":
             self.renderer.info(
                 "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · "
@@ -456,6 +509,7 @@ class ReplApp:
                 "/team [任务] 多 Agent 协作 · "
                 "/skill [list|show|off|on|reload] Skill 管理 · "
                 "/experience [list|search|show|delete|clear|on|off] 经验管理 · "
+                "/dream [status|log|undo|on|off] 后台记忆整合 · "
                 "/mcp [server|resources|restart|disable|enable] MCP · "
                 "/index [路径] 建立代码索引 · /search <query> 语义检索 · "
                 "/save [--global] <事实> 存长期记忆 · /memory list|search|delete|clear · /help 帮助"
@@ -486,7 +540,8 @@ class ReplApp:
                 "请提供要保存的内容，例如 /save 这个项目使用Java 17，或 /save --global 默认用中文回答"
             )
             return
-        entry = self.long_term.store_fact(fact, scope=scope, project_key=self.project_key)
+        with self.memory_lock:
+            entry = self.long_term.store_fact(fact, scope=scope, project_key=self.project_key)
         if entry is None:
             self.renderer.warn("长期记忆中已存在相同内容，未重复保存。")
         else:
@@ -518,15 +573,131 @@ class ReplApp:
             entry_id = parts[2] if len(parts) > 2 else ""
             if not entry_id:
                 self.renderer.warn("请提供要删除的记忆 id，例如 /memory delete fact-abcd1234")
-            elif self.long_term.delete(entry_id):
+            elif self._delete_memory(entry_id):
                 self.renderer.info(f"🗑️ 已删除长期记忆: {entry_id}")
             else:
                 self.renderer.warn(f"📭 未找到长期记忆: {entry_id}")
         elif sub == "clear":
-            self.long_term.clear()
+            with self.memory_lock:
+                self.long_term.clear()
             self.renderer.info("🧹 长期记忆已清空")
         else:
             self.renderer.warn(f"未知的 /memory 子命令: {sub}")
+
+    def _delete_memory(self, entry_id: str) -> bool:
+        """删除单条长期记忆（与 dream 应用共用锁）。"""
+        with self.memory_lock:
+            return self.long_term.delete(entry_id)
+
+    # ---------- AutoDream ----------
+
+    def _handle_dream(self, payload: str) -> None:
+        """`/dream` 子命令（P10）: 立即整合 / status / log / undo / on / off。"""
+        parts = payload.split()
+        sub = parts[0].lower() if parts else ""
+        arg = parts[1] if len(parts) > 1 else ""
+        if sub in ("", "run"):
+            self._run_dream_now()
+        elif sub == "status":
+            self._dream_status()
+        elif sub == "log":
+            self._dream_log(arg)
+        elif sub == "undo":
+            self._dream_undo(arg)
+        elif sub in ("on", "off"):
+            enabled = sub == "on"
+            self.dream_worker.set_enabled(enabled)
+            self.renderer.info(
+                f"AutoDream 自动整合已{'开启' if enabled else '关闭'}"
+                "（本会话生效；/dream 仍可手动触发）"
+            )
+        else:
+            self.renderer.warn(
+                f"未知的 /dream 子命令: {sub}"
+                "（/dream 立即整合 · status · log [id] · undo [id] · on|off）"
+            )
+
+    def _run_dream_now(self) -> None:
+        """手动触发一次整合（忽略时间 / 会话门，仍走锁与事务回滚）。"""
+        self.renderer.info("🧠 正在整理记忆（后台同款流程，稍候）…")
+        message = asyncio.run(self.dream_worker.run_now())
+        if self.dream_worker.dirty:
+            self.dream_worker.clear_dirty()
+            self._refresh_experience_index()
+        self.renderer.info(message)
+
+    def _dream_status(self) -> None:
+        state = self.dream_runner.load_state()
+        gate = self.dream_runner.check()
+        enabled = self.dream_worker.enabled
+        lines = [
+            "🧠 AutoDream 状态",
+            f"   自动整合: {'开启' if enabled else '关闭'}（本会话；环境默认 "
+            f"{'开' if self.settings.dream_enabled() else '关'}）",
+            f"   当前门判定: {gate.label} — {gate.detail}",
+            f"   后台任务: {'运行中' if self.dream_worker.busy else '空闲'}",
+            f"   累计整合: {state.dream_count} 次 · 上次: {_fmt_ts(state.last_dream_at)}",
+            f"   上次扫描: {_fmt_ts(state.last_scan_at)}",
+        ]
+        if state.last_dream_id:
+            lines.append(f"   最近 dream: {state.last_dream_id}")
+        lines.extend(
+            [
+                f"   会话转写: {self.session_log.directory}",
+                f"   整合目录: {self.dream_runner.paths.root}",
+                "   /dream 立即整合 · log [id] 查看记录 · undo [id] 撤销 · on|off 开关",
+            ]
+        )
+        self.renderer.info("\n".join(lines))
+
+    def _dream_log(self, dream_id: str) -> None:
+        state = self.dream_runner.load_state()
+        if dream_id:
+            record = next((r for r in state.history if r.dream_id == dream_id), None)
+            if record is None:
+                self.renderer.warn(f"未找到 dream 记录: {dream_id}")
+                return
+            lines = [
+                f"🧠 Dream {record.dream_id}",
+                f"   时间: {_fmt_ts(record.finished_at)} · 状态: {record.status or '未知'}"
+                f" · {record.ops} ops",
+                f"   摘要: {record.summary or '（无）'}",
+                f"   提案: {self.dream_runner.paths.proposal_dir(record.dream_id)}",
+            ]
+            proposal = Proposal.load(self.dream_runner.paths.proposal_dir(record.dream_id))
+            if proposal and proposal.ops:
+                lines.append("   操作:")
+                lines.extend(
+                    f"     {index}. {describe_op(op)}"
+                    for index, op in enumerate(proposal.ops, 1)
+                )
+            if proposal and proposal.errors:
+                lines.append("   校验问题:")
+                lines.extend(f"     - {error}" for error in proposal.errors)
+            self.renderer.info("\n".join(lines))
+            return
+
+        if not state.history:
+            self.renderer.info("还没有 dream 记录。满足条件后会在启动期自动整理。")
+            return
+        lines = ["🧠 Dream 记录（最新在前）"]
+        for item in state.history:
+            lines.append(
+                f"   {item.dream_id} · {_fmt_ts(item.finished_at)}"
+                f" · {item.status or '未知'} · {item.ops} ops · {item.summary or '（无摘要）'}"
+            )
+        lines.append("   /dream log <id> 查看操作明细 · /dream undo [id] 撤销整合")
+        self.renderer.info("\n".join(lines))
+
+    def _dream_undo(self, dream_id: str) -> None:
+        ok, message = self.dream_runner.undo(dream_id)
+        if not ok:
+            self.renderer.warn(message)
+            return
+        # 撤销直接改写了磁盘文件：重新加载内存记忆并重建 system prompt 索引段
+        self.long_term = LongTermMemory()
+        self._refresh_experience_index()
+        self.renderer.info(f"↩️ {message}")
 
     def _handle_model(self, arg: str) -> None:
         available = available_providers(self.settings)
@@ -729,7 +900,7 @@ class ReplApp:
             entry_id = parts[1] if len(parts) > 1 else ""
             if not entry_id:
                 self.renderer.warn("请提供要删除的经验 id，例如 /experience delete exp-abcd1234")
-            elif self.experience.delete(entry_id):
+            elif self._delete_experience(entry_id):
                 self._refresh_experience_index()
                 self.renderer.info(f"🗑️ 已删除经验: {entry_id}")
             else:
@@ -740,7 +911,7 @@ class ReplApp:
                 scope = None
             else:
                 scope = _parse_experience_scope(parts[1:]) or "project"
-            removed = self.experience.clear(scope)
+            removed = self._clear_experience(scope)
             self._refresh_experience_index()
             label = "全部" if scope is None else ("项目级" if scope == "project" else "全局")
             self.renderer.info(f"🧹 已清空{label}经验（{removed} 条）")
@@ -756,6 +927,14 @@ class ReplApp:
                 f"未知的 /experience 子命令: {sub}"
                 "（可用: list / search / show / delete / clear / on / off）"
             )
+
+    def _delete_experience(self, entry_id: str) -> bool:
+        with self.memory_lock:
+            return self.experience.delete(entry_id)
+
+    def _clear_experience(self, scope) -> int:
+        with self.memory_lock:
+            return self.experience.clear(scope)
 
     def _refresh_experience_index(self) -> None:
         """经验库变更后重建 system prompt 索引段（历史首条消息一起更新）。"""
@@ -787,18 +966,59 @@ class ReplApp:
         console.print(
             f"模型: {self.runtime.display_name} · 工具: {len(self.registry.names())} 个"
             f"（{self.settings.tool_mode()} 模式） · Skill: {enabled_skills} 个"
+            f" · AutoDream: {'开' if self.dream_worker.enabled else '关'}"
             f" · 项目根: {self.root}",
             style="grey50",
         )
         console.print(
             "命令: /model 切换 · /tools 工具 · /plan 计划模式 · /team 多 Agent 协作 · "
-            "/skill 管理 Skill · /experience 经验 · /compact 压缩 · "
+            "/skill 管理 Skill · /experience 经验 · /dream 记忆整合 · /compact 压缩 · "
             "/save 与 /memory 记忆 · /index 与 /search 语义检索 · /clear 清空 · /quit 退出",
             style="grey50",
         )
 
 
 # ---------- 纯函数（供 CLI 命令与测试复用） ----------
+
+
+def _fmt_ts(ts: float) -> str:
+    """时间戳 → 本地时间文本；0 表示从未发生。"""
+    if not ts:
+        return "从未"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def _last_ai_text(messages: list) -> str:
+    """取最后一条 AI 消息的文本（会话转写用；兼容 str / block 列表两种 content）。"""
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        content = message.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+        return str(content or "")
+    return ""
+
+
+def _tool_names(messages: list) -> list:
+    """提取新增 AI 消息里的工具名（只记名字，不记参数，供 AutoDream 使用）。"""
+    names = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for call in getattr(message, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
+            if name:
+                names.append(str(name))
+    return names
 
 
 def parse_save_payload(payload: str) -> tuple:

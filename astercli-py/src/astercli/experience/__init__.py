@@ -14,6 +14,7 @@ from .models import (
     CATEGORY_LABELS,
     CATEGORY_USER_CORRECTION,
     CATEGORY_WORKFLOW,
+    TRIGGER_DREAM,
     TRIGGER_HITL_REJECT,
     TRIGGER_LABELS,
     TRIGGER_LSP_ERROR,
@@ -25,7 +26,7 @@ from .models import (
     args_skeleton,
     first_line,
 )
-from .reflector import ReflectionCollector, Reflector, parse_reflection_output
+from .reflector import ReflectionCollector, Reflector, parse_reflection_output, sanitize_text
 from .store import ExperienceStore
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "ReflectionCollector",
     "ReflectionTrigger",
     "Reflector",
+    "TRIGGER_DREAM",
     "TRIGGER_HITL_REJECT",
     "TRIGGER_LABELS",
     "TRIGGER_LSP_ERROR",
@@ -47,4 +49,5 @@ __all__ = [
     "args_skeleton",
     "first_line",
     "parse_reflection_output",
+    "sanitize_text",
 ]

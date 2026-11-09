@@ -50,7 +50,7 @@ uv run astercli 你的提问  # 一次性运行模式
 uv run pytest            # Python 版测试（549 个）
 ```
 
-Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。
+Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。P9 起支持 `/experience`，P10 起支持 `/dream [status|log|undo|on|off]`（无参数立即整合）。
 
 Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / Ctrl+O 展开 / ESC 取消 / I 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。工具参数在执行前按 Schema 做浅层校验（required / 基本类型 / enum），命令可选 OS 级沙箱（`ASTERCLI_COMMAND_SANDBOX`，与 Java 同名同语义，fail-closed）。
 
@@ -63,6 +63,8 @@ Python 版 P7 起支持 Multi-Agent / Skill / web 工具：`/team [任务]` 三�
 Python 版 P8 起支持 LSP 诊断：进程内解析（非真实 LSP server，对齐 Java Phase 17 轻量形态）——`.py` 走内置 ast、其余复用 P6 tree-sitter 语法树（比 Java 仅 JavaParser 单 .java 覆盖更宽）；`write_file` 出口钩子收集（异常静默不影响写入主路径），ReAct/Plan/team 三路径调 LLM 前把 pending 诊断作为 `[LSP 诊断注入]` user message 注入并 renderer 显示、注入消息跨轮保留；`ASTERCLI_LSP_ENABLED`（默认开，仅显式 false 关闭）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20）可调。
 
 Python 版 P9 起支持反思经验（Java 版无对应模块，属 Python 独立设计）：三类触发（工具失败 / 超时 / 策略拒绝、HITL 用户拒绝、LSP error 级诊断）由 registry 出口与 LSP 回调采集，轮末用独立 LLM 调用提炼 `lesson / correct_action / category / confidence`，按内容签名去重合并（hits +1）；落盘为独立 Markdown——项目级 `<项目根>/.astercli/experience/exp-*.md`（可 git 共享）+ 全局 `~/.astercli-py/experience/`（`ASTERCLI_EXPERIENCE_DIR` 可覆盖），目录内维护 `index.md`、单目录上限 200 条按 hits × 时效淘汰；注入走启动期 system prompt 索引段（一次）+ 每轮任务级 top-K user message；`/experience list|search|show|delete|clear|on|off` 管理；护栏 `ASTERCLI_REFLECTION_ENABLED`（默认开）/ `ASTERCLI_REFLECTION_SESSION_LIMIT`（默认 3）/ `ASTERCLI_REFLECTION_TIMEOUT_SECONDS`（默认 30）/ `ASTERCLI_EXPERIENCE_MAX_ENTRIES`（默认 200），解析失败 / 低置信度 / LLM 异常一律丢弃且不影响主任务。
+
+Python 版 P10 起支持 AutoDream 后台记忆整合（Java 版无对应模块，属 Python 独立设计）：每轮最小会话转写（用户原文 / 最终回答 / 工具名，截断 2000 字，不落工具参数与完整输出）按项目哈希写入 `~/.astercli-py/sessions/<hash>/<session-id>.jsonl`；启动期主线程只做五道廉价门检查（开关 → 距上次整合 ≥24h → 距上次扫描 ≥10min → 上次整合后新增 ≥5 会话 → PID 锁，1h 过期抢占），通过后起守护线程 + 线程内独立事件循环（CLI 每轮 `asyncio.run` 结束后主循环销毁），完成通知入队、下一次输入前打印；单次 LLM 调用完成"归纳 → 去重/冲突 → 提炼经验 → 输出 ops"（输入 ≤30k tokens、输出 ≤20 ops、超时 120s），ops 代码侧校验 id 存在性与长度；apply 前对长期记忆 JSON 与全部经验文件做快照，删除一律软删除到 `dream/<hash>/archive/<dream-id>/`，任一落盘失败整体回滚，成功才推进 `state.json`；`/dream`（立即整合）/ `status` / `log <id>` / `undo [id]` / `on|off` 管理；配置 `ASTERCLI_DREAM_ENABLED`（默认开）/ `_MIN_HOURS`（24）/ `_MIN_SESSIONS`（5）/ `_SCAN_INTERVAL_MINUTES`（10）/ `_MODEL`（默认当前模型）/ `_MAX_INPUT_TOKENS`（30000）/ `_TIMEOUT_SECONDS`（120）/ `ASTERCLI_SESSION_LOG`（默认开）/ `ASTERCLI_SESSION_LOG_DIR` / `ASTERCLI_DREAM_DIR`。
 
 ## 架构概览
 
@@ -147,8 +149,8 @@ src/main/java/com/astercli/
 
 ### Memory
 
-- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
-- 经验（Python P9）与长期记忆是两条独立通道：经验是失败信号的自动复盘（工具失败 / HITL 拒绝 / LSP error），长期记忆是手动保存的稳定事实；自动沉淀经验不违反"不自动提取事实"约束
+- 长期记忆默认只通过 `/save` 或用户明确要求保存，不要自动提取事实；**AutoDream（Python P10）是唯一例外**：它只整理已发生的会话/既有记忆，且必须可审计（`/dream log`）、可回滚（`/dream undo`，快照还原）、删除一律软删除归档，写入条目带 `metadata.source=dream` 与 `dream_id`；`ASTERCLI_DREAM_ENABLED=false` 或 `/dream off` 可关闭自动写入
+- 经验（Python P9）与长期记忆是两条独立通道：经验是失败信号的自动复盘（工具失败 / HITL 拒绝 / LSP error）以及 dream 的跨会话补充，长期记忆是稳定事实；自动沉淀经验不违反"不自动提取事实"约束
 - 经验必须可审计可删除：`/experience list|search|show|delete|clear`，`/experience off` 同时关闭自动复盘与经验注入
 - `ASTER.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `ASTER.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
@@ -226,6 +228,8 @@ src/main/java/com/astercli/
 ### 5.5 改 MCP → `mcp/` + ToolRegistry + HITL + AuditLog + 提示词 + 文档 + 测试
 
 ### 5.6 改经验反思（Python `astercli-py/`）→ `experience/` + `tools/registry.py` 埋点 + `lsp/manager.py` 回调 + `prompt.py` 注入 + `cli/main.py` 轮末消费与命令 + `.env.example` + 文档 + 测试
+
+### 5.7 改 AutoDream（Python `astercli-py/`）→ `dream/`（session_log / gates / snapshot / consolidator / proposal / applier / runner）+ `cli/main.py` 转写与 `/dream` 命令 + `memory/long_term.py` 批量接口 + `experience/store.py` 软删除 + `config.py` + `.env.example` + 文档 + 测试
 
 ### 6. 不提交 `.env` / 真实 API Key / `target/` 产物
 

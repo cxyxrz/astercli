@@ -1,10 +1,10 @@
-# AsterCLI Python 重写版（P1–P9）
+# AsterCLI Python 重写版（P1–P10）
 
 用 **LangChain + LangGraph** 重写 Java 版 AsterCLI 的核心路径，与仓库根的 Java 版并行演进：
 
 - Java 版 = 生产版本，Python 侧改动不回写 Java 代码
 - 分期路线图：仓库 `.trae/documents/python-langchain-rewrite.md`
-- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）、P9（反思经验：三类触发自动复盘 + Markdown 归档 + `/experience`）
+- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）、P9（反思经验：三类触发自动复盘 + Markdown 归档 + `/experience`）、P10（AutoDream：会话转写 + 五道门 + 后台事务化记忆整合 + `/dream`）
 
 ## 运行
 
@@ -27,6 +27,7 @@ uv run pytest                            # 全量单测
 - `/team [任务]` 多 Agent 协作：无参数时下一条输入进入团队协作；带参数直接协作该任务
 - `/skill [list|show <name>|off <name>|on <name>|reload]` Skill 管理（三层目录加载，banner 显示启用数）
 - `/experience [list|search <关键词>|show <id>|delete <id>|clear [--global|--all]|on|off]` 经验管理（P9；`list` 支持 `--project` / `--global` 过滤）
+- `/dream [status|log <id>|undo [id]|on|off]` 后台记忆整合（P10；无参数立即整合一次，`status` 看门判定与统计）
 - `/mcp [status|resources <server>|restart <server>|disable <server>|enable <server>]` MCP server 管理
 - `/index [路径]` 对项目（或项目内子目录）建立/重建 RAG 向量索引
 - `/search <query>` 不经过 LLM 直接做语义混合检索
@@ -129,6 +130,19 @@ uv run pytest                            # 全量单测
 - **护栏**：`ASTERCLI_REFLECTION_ENABLED`（默认开，仅显式 false 关闭）/ `ASTERCLI_REFLECTION_SESSION_LIMIT`（默认 3，按尝试计数）/ `ASTERCLI_REFLECTION_TIMEOUT_SECONDS`（默认 30）/ `ASTERCLI_EXPERIENCE_MAX_ENTRIES`（默认 200）；会话内同触发签名只反思一次；`confidence=low`、空 lesson、JSON 解析失败、LLM 异常一律丢弃，绝不影响主任务；`/experience off` 同时关闭复盘与注入，`/clear` 重置会话配额但保留经验库
 - **长期记忆 vs 经验**：`/save` 保存的是**事实**（手动、稳定、跨会话）；经验是**自动复盘**的操作教训（按失败信号沉淀、可删除、可命中累加），两条通道互不替代
 
+## AutoDream 后台记忆整合（P10）
+
+Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`"变成"启动期后台离线整理"。
+
+- **会话转写**：每轮只记最小信号（用户原文 / 最终回答 / 工具名，单条截断 2000 字，不落工具参数与完整输出），按项目哈希写到 `~/.astercli-py/sessions/<hash>/<session-id>.jsonl`；`ASTERCLI_SESSION_LOG=false` 关闭
+- **五道门**：开关 → 距上次整合 ≥24h → 距上次扫描 ≥10min → 上次整合后新增 ≥5 个会话 → 跨进程 PID 锁（1h 过期自动抢占）；主线程只做廉价门检查，通过后才起守护线程，完成通知在下一次输入前打印
+- **单次结构化整合**：长期记忆 + 经验库 + 最近会话拼成 ≤30k tokens 输入，一次 LLM 调用完成"归纳 → 去重/冲突 → 提炼经验 → 输出 ops"；单次 ≤20 条 op，代码侧校验 id 必须存在、字段长度上限、项目路径脱敏
+- **事务应用**：apply 前对长期记忆 JSON 与全部经验文件做快照；删除一律软删除（归档到 `dream/<hash>/archive/<dream-id>/`）；任一落盘失败整体回滚；支持 memory_add / update / delete / merge 与 experience_add / delete 六类 op
+- **可审计可回滚**：一次整合 = 一个 dream-id；`/dream log [id]` 查看摘要与 op 明细，`/dream undo [id]` 按快照还原上一笔（连带回退 state 时间戳）
+- **配置**：`ASTERCLI_DREAM_ENABLED`（默认开）/ `ASTERCLI_DREAM_MIN_HOURS`（24）/ `ASTERCLI_DREAM_MIN_SESSIONS`（5）/ `ASTERCLI_DREAM_SCAN_INTERVAL_MINUTES`（10）/ `ASTERCLI_DREAM_MODEL`（默认当前模型）/ `ASTERCLI_DREAM_MAX_INPUT_TOKENS`（30000）/ `ASTERCLI_DREAM_TIMEOUT_SECONDS`（120）/ `ASTERCLI_SESSION_LOG`（默认开）/ `ASTERCLI_SESSION_LOG_DIR` / `ASTERCLI_DREAM_DIR`
+- **与经验/长期记忆的关系**：AutoDream 是唯一允许自动写长期记忆的通道（见 `AGENTS.md` Memory 约束），写入条目带 `metadata.source=dream` 与 `dream_id`；经验仍按 P9 自动复盘，dream 只做跨会话去重与补充
+- **后台线程模型**：CLI 每轮 `asyncio.run` 结束后主事件循环销毁，dream 用守护线程 + 线程内独立事件循环；不碰 prompt_toolkit 输入区，结果只进通知队列
+
 ## 与 Java 版的已知差异
 
 - `grep_code` 暂为纯 Python 扫描引擎（Java 版优先 ripgrep，后续对齐）
@@ -141,3 +155,4 @@ uv run pytest                            # 全量单测
 - Multi-Agent 依赖批次内顺序执行（Java Worker 池并行）；Java builtin（jar 内置）skill 层暂无 Python 内置资产；web_search 不迁移 step-3.7-flash 下转调 StepSearch MCP 的偏好
 - LSP 诊断引擎差异：`.py` 内置 ast + 其余 tree-sitter 多语言（Java 仅 JavaParser 单 .java）；诊断同时进 renderer 显示（Java 只进 conversationHistory）；开关仅环境变量口径（Java 另支持系统属性）
 - 经验子系统为 Python 版独立设计（Java 暂无对应模块，不回写 Java）；存储选 Markdown 文件而非 SQLite / JSON；长期记忆与经验互不替代（事实手动存、经验自动沉淀）
+- AutoDream 为 Python 版独立设计（Java 无对应模块）：会话转写落 jsonl、睡眠式启动门控、事务化 apply + 快照撤销均无 Java 对应实现

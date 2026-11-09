@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -124,6 +125,38 @@ class ExperienceStore:
             except OSError:
                 return False
         return False
+
+    def archive(self, entry_id: str, archive_dir: Path) -> bool:
+        """软删除：把 ``exp-<id>.md`` 移到归档目录（AutoDream 可回滚删除用）。
+
+        归档不是硬删，``/dream undo`` 可以按快照把文件放回原位置。
+        """
+        entry_id = (entry_id or "").strip()
+        for scope in self._scopes():
+            directory = self._dir(scope)
+            if directory is None:
+                continue
+            path = directory / f"{entry_id}.md"
+            try:
+                if not path.is_file():
+                    continue
+                Path(archive_dir).mkdir(parents=True, exist_ok=True)
+                shutil.move(str(path), str(Path(archive_dir) / path.name))
+                self._rebuild_index(scope, directory)
+                return True
+            except OSError:
+                return False
+        return False
+
+    def entry_paths(self) -> List[Path]:
+        """全部经验文件（AutoDream 快照用）。"""
+        paths: List[Path] = []
+        for scope in self._scopes():
+            directory = self._dir(scope)
+            if directory is None:
+                continue
+            paths.extend(self._entry_paths(directory))
+        return paths
 
     def clear(self, scope: Optional[str] = None) -> int:
         """清空指定作用域（None 表示全部），返回删除条目数。"""

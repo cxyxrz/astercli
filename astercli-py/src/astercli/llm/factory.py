@@ -58,8 +58,13 @@ _LLM_TIMEOUT = httpx.Timeout(600.0, connect=60.0, read=300.0, write=60.0)
 _STREAM_CHUNK_TIMEOUT = 300.0
 
 
-def create_client(provider: Optional[str], settings: Settings) -> Optional[ProviderRuntime]:
-    """按 provider 名创建客户端；未配置 Key 或未知 provider 返回 None（对齐 Java 语义）。"""
+def create_client(
+    provider: Optional[str], settings: Settings, *, model: Optional[str] = None
+) -> Optional[ProviderRuntime]:
+    """按 provider 名创建客户端；未配置 Key 或未知 provider 返回 None（对齐 Java 语义）。
+
+    ``model`` 显式传入时覆盖 provider 配置（AutoDream 的 ASTERCLI_DREAM_MODEL 用）。
+    """
     key = normalize_provider(provider)
     if key is None or key not in PROVIDER_SPECS:
         return None
@@ -67,7 +72,7 @@ def create_client(provider: Optional[str], settings: Settings) -> Optional[Provi
     api_key = settings.api_key(spec)
     if not api_key:
         return None
-    model = settings.model(spec)
+    model = (model or "").strip() or settings.model(spec)
     base_url = settings.base_url(spec) or default_base_url(key, model)
     common = dict(
         model=model,

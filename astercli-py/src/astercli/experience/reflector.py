@@ -235,11 +235,11 @@ class Reflector:
         if category not in VALID_CATEGORIES:
             category = DEFAULT_TRIGGER_CATEGORY.get(trigger.kind, VALID_CATEGORIES[0])
         # 证据只保留首行并做最小脱敏（避免把绝对路径写进可共享的 git 目录）
-        evidence = _sanitize(trigger.evidence(), self._project_key)
+        evidence = sanitize_text(trigger.evidence(), self._project_key)
         return ExperienceEntry(
             id=f"exp-{uuid.uuid4().hex[:8]}",
-            lesson=_sanitize(lesson, self._project_key),
-            correct_action=_sanitize(action, self._project_key),
+            lesson=sanitize_text(lesson, self._project_key),
+            correct_action=sanitize_text(action, self._project_key),
             category=category,
             trigger=trigger.kind,
             evidence=evidence,
@@ -287,8 +287,8 @@ def _extract_text(response) -> str:
     return str(content or "")
 
 
-def _sanitize(text: str, project_key: str = "") -> str:
-    """最小脱敏：折叠换行、替换项目根路径占位、限长。"""
+def sanitize_text(text: str, project_key: str = "") -> str:
+    """最小脱敏：折叠换行、替换项目根路径占位、限长（反思与 dream 共用）。"""
     value = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     value = " ".join(line.strip() for line in value.split("\n") if line.strip())
     if project_key:

@@ -133,6 +133,15 @@ class LongTermMemory:
         self, fact: str, scope: str = "project", project_key: Optional[str] = None
     ) -> Optional[MemoryEntry]:
         """保存事实到长期记忆；内容完全相同则跳过（返回 None）。"""
+        entry = self.add_fact(fact, scope=scope, project_key=project_key)
+        if entry is not None:
+            self._save()
+        return entry
+
+    def add_fact(
+        self, fact: str, scope: str = "project", project_key: Optional[str] = None
+    ) -> Optional[MemoryEntry]:
+        """只在内存中新增事实，不落盘（AutoDream 批量事务用）。"""
         fact = (fact or "").strip()
         if not fact:
             return None
@@ -150,8 +159,29 @@ class LongTermMemory:
             token_count=estimate_tokens(fact),
         )
         self._entries[entry.id] = entry
-        self._save()
         return entry
+
+    def update_content(self, entry_id: str, content: str) -> Optional[MemoryEntry]:
+        """就地改写一条记忆内容（不落盘，由调用方 persist）。"""
+        content = (content or "").strip()
+        entry = self._entries.get(entry_id)
+        if entry is None or not content:
+            return None
+        entry.content = content
+        entry.token_count = estimate_tokens(content)
+        return entry
+
+    def pop(self, entry_id: str) -> Optional[MemoryEntry]:
+        """从内存中移除并返回条目（不落盘，由调用方决定归档与持久化）。"""
+        return self._entries.pop(entry_id, None)
+
+    def persist(self) -> bool:
+        """显式落盘；返回是否成功（批量事务用于判断是否需要回滚）。"""
+        return self._save()
+
+    @property
+    def storage_file(self) -> Path:
+        return self._file
 
     def delete(self, entry_id: str) -> bool:
         if self._entries.pop(entry_id, None) is None:
@@ -192,15 +222,16 @@ class LongTermMemory:
 
     # ---------- 持久化 ----------
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             data = [e.to_dict() for e in self._entries.values()]
             self._file.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            return True
         except OSError:
-            pass  # 持久化失败静默，不阻断主流程
+            return False  # 持久化失败静默，不阻断主流程
 
     def _load(self) -> None:
         if not self._file.exists():

@@ -164,12 +164,58 @@ class Settings:
         """单个经验目录条目上限（默认 200，超额按 hits × 时效淘汰）。"""
         return _positive_int(self.get("ASTERCLI_EXPERIENCE_MAX_ENTRIES"), 200)
 
+    # ---------- AutoDream（P10） ----------
+
+    def dream_enabled(self) -> bool:
+        """后台记忆整合总开关：对齐 LSP / 反思语义，仅显式 false 关闭。"""
+        raw = self.get("ASTERCLI_DREAM_ENABLED")
+        return (raw or "").strip().lower() != "false"
+
+    def dream_min_hours(self) -> float:
+        """两次 dream 的最小间隔（默认 24 小时）。"""
+        return _positive_float(self.get("ASTERCLI_DREAM_MIN_HOURS"), 24.0)
+
+    def dream_min_sessions(self) -> int:
+        """触发 dream 所需的新增会话数（默认 5）。"""
+        return _positive_int(self.get("ASTERCLI_DREAM_MIN_SESSIONS"), 5)
+
+    def dream_scan_interval_minutes(self) -> float:
+        """启动扫描节流（默认 10 分钟，避免频繁启动重复扫目录）。"""
+        return _positive_float(self.get("ASTERCLI_DREAM_SCAN_INTERVAL_MINUTES"), 10.0)
+
+    def dream_model(self) -> Optional[str]:
+        """dream 使用的模型名；未配置时复用当前 provider 默认模型。"""
+        return self.get("ASTERCLI_DREAM_MODEL") or None
+
+    def dream_max_input_tokens(self) -> int:
+        """单次整合输入预算（默认 30000 tokens）。"""
+        return _positive_int(self.get("ASTERCLI_DREAM_MAX_INPUT_TOKENS"), 30_000)
+
+    def dream_timeout_seconds(self) -> int:
+        """单次整合 LLM 调用超时（默认 120 秒）。"""
+        return _positive_int(self.get("ASTERCLI_DREAM_TIMEOUT_SECONDS"), 120)
+
+    def session_log_enabled(self) -> bool:
+        """会话转写开关：仅显式 false 关闭（关闭后无 dream 素材）。"""
+        raw = self.get("ASTERCLI_SESSION_LOG")
+        return (raw or "").strip().lower() != "false"
+
 
 def _positive_int(raw: Optional[str], default: int) -> int:
     if raw is None or not raw.strip():
         return default
     try:
         parsed = int(raw.strip())
+        return parsed if parsed > 0 else default
+    except ValueError:
+        return default
+
+
+def _positive_float(raw: Optional[str], default: float) -> float:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw.strip())
         return parsed if parsed > 0 else default
     except ValueError:
         return default

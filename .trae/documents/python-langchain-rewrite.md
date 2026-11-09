@@ -75,6 +75,7 @@ tests/                      # 与 src 镜像：tests/llm/、tests/tools/、tests
 | **P7 Multi-Agent / Skill / web 工具（已交付）** | `AgentOrchestrator`（planner → worker → reviewer 流水线，worker 复用 `build_react_graph` 全量继承工具/budget/HITL/reasoning 流式）+ Skill 三层目录加载 + `load_skill` + `SkillContextBuffer` 下一轮注入 + system prompt 索引段（≤20 个/4KB）+ `web_search`（zhipu/serpapi/searxng 三 provider）+ `web_fetch`（NetworkPolicy SSRF 围栏 + 极简 readability） | `/team` 真实 LLM 协作跑通两步依赖链（含 reviewer 拒绝→反馈→重试→通过完整生命周期）；`/skill` 项目级 SKILL.md 加载→`load_skill`→buffer 注入全链路生效；web_search 真实 API 错误识别友好提示 + web_fetch 真实抓取 example.com 转 Markdown；`uv run pytest` 526 全绿（新增 116） |
 | **P8 LSP 诊断（已交付）** | 进程内解析诊断（对齐 Java Phase 17 的轻量形态，非真实 LSP server）：`.py` 用内置 ast、其余复用 P6 tree-sitter 8 语言 grammar 收集 ERROR/MISSING 节点；`write_file` 出口钩子（失败静默不影响写入主路径）+ ReAct 图 agent 节点调 LLM 前 `[LSP 诊断注入]` user message 注入 + renderer 显示；三条路径（ReAct / Plan / team worker）复用 `build_react_graph` 全覆盖；`ASTERCLI_LSP_ENABLED`（默认开）/ `ASTERCLI_LSP_MAX_DIAGNOSTICS`（默认 20） | REPL 内让 Agent 写坏一个 `.py` 文件，下一轮 LLM 输入含 `[LSP 诊断注入]` + `[error]` 行且 Agent 据此修复；`ASTERCLI_LSP_ENABLED=false` 后不再收集；修复文件后 pending 清空；`uv run pytest` 全绿 |
 | **P9 反思经验（已交付）** | 三层设计的前两层 + 最小注入：①触发矩阵（工具失败 / HITL 拒绝 / LSP error）→ 独立 LLM 复盘 → 结构化经验；②一经验一 Markdown（项目 `.astercli/experience/` 可 git 共享 + 全局 `~/.astercli-py/experience/`）+ `index.md` + 200 条容量淘汰；③启动期 system prompt 索引段 + 任务级 top-K user message 注入；`/experience list\|search\|show\|delete\|clear\|on\|off`；护栏 `ASTERCLI_REFLECTION_ENABLED`（默认开）/ `SESSION_LIMIT`（默认 3）/ `TIMEOUT_SECONDS`（默认 30）/ `EXPERIENCE_MAX_ENTRIES`（默认 200） | HITL 拒绝并填写原因 → 终端出现 `🧠 已沉淀经验` 且 `.astercli/experience/` 生成 `exp-*.md` + `index.md`；`/experience list/search/show/off/on` 可管理；`uv run pytest` 600 全绿 |
+| **P10 AutoDream（已交付）** | Claude Code 式后台记忆整合：会话转写（jsonl 最小信号，不落工具输出）+ 五道门（开关 / 24h / 10min 扫描节流 / 5 个新会话 / PID 锁）+ 单次结构化 LLM 复盘（≤30k 输入、≤20 ops、120s 超时，四阶段在提示词内完成）+ 事务 apply（快照备份、软删除归档、失败整体回滚）+ 守护线程与通知队列 + `/dream [status\|log\|undo\|on\|off]` | 满足门槛启动时后台自动整理，下一次输入前打印结果；`/dream status` 显示门判定；`/dream` 手动立即整合；`/dream log` 查看 ops 明细、`/dream undo` 完整还原；`uv run pytest` 695 全绿 |
 
 **明确暂不迁移**（后续再议）：微信 iLink 通道、Chrome DevTools/CDP、完整 TUI 视觉（底部状态栏/dock/live thinking 区）、Side-Git 快照、Runtime API、图片输入、Lanterna 降级。
 
@@ -240,4 +241,23 @@ P3 收尾时实测（2026-10）：venv 内 langchain 1.4.3（transitively 安装
 **测试** 600 → 610（参数校验新增 10，含 3 个既有用例随新行为调整）→ 637（沙箱新增 27，纯函数断言 profile / argv，不真正执行沙箱）。
 
 **live smoke（macOS 真机）**：开启沙箱后 `echo hi` 正常、项目根与 `/tmp` 写入成功、写 `~/astercli-sbx-should-fail.txt` 被内核拒绝（`Operation not permitted`）。
+
+## P10 交付记录
+
+**选型**：对齐 Claude Code auto-dream 的"离线整理"语义，但按 Python 版现状重新落位——CLI 每轮 `asyncio.run` 结束后主事件循环销毁，因此 dream 用**守护线程 + 线程内独立事件循环**（复用 MCP 后台线程先例）；主线程只做廉价门检查，避免启动被 LLM 阻塞。写入策略按验收拍板为**全自动**，因此把安全兜底做进结构：快照、事务回滚、软删除归档、dream-id 审计、`/dream undo`。
+
+**交付内容**：
+
+- `dream/session_log.py`：每轮最小转写（user 原文 / assistant 最终回答 / 工具名，单条 2000 字截断，不落工具参数与输出）；按项目哈希隔离到 `~/.astercli-py/sessions/<hash>/`；`ASTERCLI_SESSION_LOG=false` 关闭，`ASTERCLI_SESSION_LOG_DIR` 可覆盖；IO 异常静默
+- `dream/gates.py` + `dream/runner.py#DreamRunner.check`：四道纯函数门（开关 → 距上次整合 ≥24h → 距上次扫描 ≥10min → 上次整合后新增 ≥5 会话，当前会话排除）+ `DreamLock` 跨进程 PID 锁（1h 过期、持有进程消失自动回收、释放不误删他人锁）
+- `dream/snapshot.py`：apply 前复制长期记忆 JSON 与全部经验 Markdown 到 `backups/<dream-id>/`，manifest 记录 original / backup / existed；restore 覆盖已存在文件并删除 dream 期间新建文件
+- `dream/consolidator.py`：长期记忆 + 经验库 + 最近会话按 `ASTERCLI_DREAM_MAX_INPUT_TOKENS`（默认 30k）裁剪；单次 LLM 调用完成"归纳 → 去重/冲突 → 提炼经验 → 输出 ops"，超时 120s；异常 / 非 JSON 一律折叠进 `Proposal.errors`
+- `dream/proposal.py`：6 类 op（memory_add/update/delete/merge、experience_add/delete）代码侧校验——id 必须存在、字段长度上限、单次 ≤20 条、项目根路径脱敏；proposal.md + ops.json 落盘
+- `dream/applier.py`：短临界区事务应用（与 `/save`、`/memory` 共用 `threading.RLock`）；任一落盘失败用快照整体回滚；记忆删除写 `archive/<dream-id>/memory/`、经验删除移动到 `archive/<dream-id>/experience/`，不硬删；dream 写入条目带 `metadata.source=dream` + `dream_id`
+- `dream/runner.py#DreamWorker`：启动期门检查 → 抢锁 → 守护线程 `asyncio.run`；结果进 `queue.Queue`，REPL 在下一次 `session.prompt` 前 flush（不抢 prompt_toolkit 输入区）；`/dream` 手动执行忽略时间 / 会话门但仍走锁与事务
+- `cli/main.py`：每轮 `record_user` / `record_tools` / `record_assistant`（ReAct / Plan / team 三路径）；`/dream [status|log|undo|on|off]`；banner / `/help` 同步；`/dream undo` 后重载长期记忆并重建 system prompt 经验索引段
+- `memory/long_term.py`：新增 `add_fact` / `update_content` / `pop` / `persist` / `storage_file`（批量事务接口），`_save` 返回成功与否；`experience/store.py`：新增 `archive`（软删除）+ `entry_paths`；`experience/models.py`：新增 `TRIGGER_DREAM`（`dream` 来源经验）
+- 测试 637 → 695（新增 58：session_log 10 / gates 9 / lock+state 8 / snapshot 5 / proposal 9 / consolidator 6 / applier 5 / worker 6；全中文零网络，dream 用 fake client）
+
+**与 Java 版的差异**：Java 无 AutoDream（Python 独立设计，不回写 Java）；长期记忆的"只手动保存"约束按 `AGENTS.md` 修订为"AutoDream 是唯一例外，且必须可审计 / 可回滚 / 软删除"。
 
