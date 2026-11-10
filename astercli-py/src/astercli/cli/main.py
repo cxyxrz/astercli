@@ -76,6 +76,7 @@ from ..rag import (
 )
 from .plan_review import review_plan
 from .renderer import ConsoleRenderer
+from .status_bar import StatusState, toolbar_fragments
 
 
 def main(argv=None) -> int:
@@ -104,11 +105,18 @@ def main(argv=None) -> int:
             )
             return 1
 
-    console = Console(highlight=False, markup=False)
-    renderer = ConsoleRenderer(console)
-    app = ReplApp(settings, runtime, renderer, Path.cwd())
-
     one_shot = " ".join(args.prompt).strip()
+    console = Console(highlight=False, markup=False)
+    # 一次性模式没有输入态底栏，保留轮末 usage 行；REPL 交给底部状态栏展示
+    status = None
+    if not one_shot:
+        status = StatusState(
+            model=runtime.display_name,
+            context_window=runtime.context_window,
+            cwd=str(Path.cwd()),
+        )
+    renderer = ConsoleRenderer(console, status=status)
+    app = ReplApp(settings, runtime, renderer, Path.cwd())
     if one_shot:
         try:
             asyncio.run(app.run_turn(one_shot))
@@ -146,6 +154,11 @@ class ReplApp:
             settings=settings, approval=self.approval, reflection=self.reflection_collector
         )
         register_file_tools(self.registry, self.path_guard)
+        # 行内 diff（P11）：write_file 成功后由 registry 出口回调渲染器，
+        # 与 LSP 钩子同级，异常在 registry 内静默
+        self.registry.set_file_write_listener(
+            lambda path, before, after: self.renderer.diff(path, before, after)
+        )
         # 第三层命令沙箱：开启后 execute_command 子进程在写围栏内运行
         # （未开启时 wrap 返回裸 bash，行为与之前完全一致）
         register_shell_tools(
@@ -287,9 +300,26 @@ class ReplApp:
 
     def run(self) -> int:
         self._print_banner()
-        from prompt_toolkit import PromptSession
+        import shutil
 
-        session: PromptSession = PromptSession()
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.key_binding import KeyBindings
+
+        bindings = KeyBindings()
+
+        @bindings.add("c-o")
+        def _expand_last_block(event) -> None:
+            # 折叠块写在 transcript 里，需先把输入区让出来再重绘（对齐 Java Ctrl+O）
+            event.app.run_in_terminal(lambda: self.renderer.toggle_last_block())
+
+        def _toolbar():
+            status = getattr(self.renderer, "status", None)
+            if status is None:
+                return []
+            cols = shutil.get_terminal_size(fallback=(120, 24)).columns
+            return toolbar_fragments(status, cols)
+
+        session: PromptSession = PromptSession(key_bindings=bindings, bottom_toolbar=_toolbar)
         while True:
             self._flush_dream_notices()
             try:
@@ -299,26 +329,49 @@ class ReplApp:
             stripped = text.strip()
             if not stripped:
                 continue
+            # 提交回显：JLine 侧用 `>` 前缀写回 transcript，这里等价补一行
+            self.renderer.echo_input(stripped)
             if stripped.startswith("/"):
                 if self._handle_command(stripped):
                     break
                 continue
+            started = time.monotonic()
             try:
                 # /plan 或 /team 无参数后下一次输入进入对应模式
                 use_plan = self._next_use_plan
                 use_team = self._next_use_team
                 self._next_use_plan = False
                 self._next_use_team = False
+                self.renderer.begin_turn()
                 if use_team:
                     asyncio.run(self.run_team_turn(stripped))
                 elif use_plan:
                     asyncio.run(self.run_plan_turn(stripped))
                 else:
                     asyncio.run(self.run_turn(stripped))
+                self._refresh_status(int((time.monotonic() - started) * 1000))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 self.renderer.warn("⏹️ 已取消当前任务。")
+                self._refresh_status(int((time.monotonic() - started) * 1000))
         self.mcp.shutdown()
         return 0
+
+    def _refresh_status(self, elapsed_ms: int) -> None:
+        """刷新底部状态栏：phase 回 idle + 当前上下文 token 估算。"""
+        status = getattr(self.renderer, "status", None)
+        if status is None:
+            return
+        try:
+            context_tokens = estimate_messages_tokens(self.history)
+        except Exception:  # noqa: BLE001 —— 估算失败不影响主循环
+            context_tokens = 0
+        status.update(
+            phase="idle",
+            model=self.runtime.display_name,
+            context_window=self.runtime.context_window,
+            context_tokens=context_tokens,
+            elapsed_ms=elapsed_ms,
+        )
 
     # ---------- 单轮执行 ----------
 

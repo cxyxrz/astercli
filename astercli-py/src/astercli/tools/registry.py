@@ -152,6 +152,8 @@ class ToolRegistry:
         self._default_timeout = settings.tool_timeout_seconds()
         # LSP 诊断（P8）：None 表示诊断整体禁用（对齐 Java lspManager 为 null）
         self._lsp_manager = None
+        # 行内 diff 出口回调（P11）：参数 (display_path, before, after)，None 表示不渲染
+        self._file_write_listener = None
         # 经验反思采集器（P9）：None 表示不采集触发信号
         self._reflection = reflection
 
@@ -181,6 +183,21 @@ class ToolRegistry:
         if self._lsp_manager is None:
             return EMPTY_REPORT
         return self._lsp_manager.flush_pending_diagnostics()
+
+    # ---------- 行内 diff（对齐 Java InlineDiffRenderer 的写出钩子） ----------
+
+    def set_file_write_listener(self, listener) -> None:
+        """挂载 write_file 成功后的 diff 回调（None 表示不渲染）。"""
+        self._file_write_listener = listener
+
+    def report_file_write(self, display_path: str, before, after) -> None:
+        """write_file 出口的 diff 钩子：任何异常静默，不影响工具主结果。"""
+        if self._file_write_listener is None:
+            return
+        try:
+            self._file_write_listener(display_path, before, after)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------- 经验反思采集（P9） ----------
 

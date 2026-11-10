@@ -444,3 +444,43 @@ async def test_execute_all_truncates_huge_output():
     results = await registry.execute_all([call("echo", {"path": "x"})])
     assert len(results[0].content) < 500
     assert "⚠️ 输出已截断" in results[0].content
+
+
+# ---------- 行内 diff 出口钩子（P11） ----------
+
+
+def test_file_write_listener_forwards():
+    registry = make_registry()
+    seen = []
+    registry.set_file_write_listener(lambda path, before, after: seen.append((path, before, after)))
+    registry.report_file_write("a.py", "old", "new")
+    assert seen == [("a.py", "old", "new")]
+
+
+def test_file_write_listener_swallows_errors():
+    registry = make_registry()
+    registry.set_file_write_listener(lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    registry.report_file_write("a.py", None, "new")  # 不应抛出
+
+
+def test_write_file_reports_before_and_after(tmp_path):
+    from astercli.policy import PathGuard
+    from astercli.tools.builtin.files import _write_file
+
+    class _Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def report_file_write(self, path, before, after):
+            self.calls.append((path, before, after))
+
+        def run_post_edit_lsp_hook(self, *args):
+            pass
+
+    recorder = _Recorder()
+    write_file = _write_file(PathGuard(tmp_path), recorder)
+    assert write_file({"path": "a.py", "content": "x = 1\n"}).startswith("文件已写入")
+    assert recorder.calls[-1][1] is None
+    write_file({"path": "a.py", "content": "x = 2\n"})
+    assert recorder.calls[-1][1] == "x = 1\n"
+    assert recorder.calls[-1][2] == "x = 2\n"

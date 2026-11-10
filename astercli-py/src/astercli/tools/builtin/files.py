@@ -23,6 +23,7 @@ EXCLUDED_DIRS = {
 }
 
 MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024   # 单文件 5MB 上限
+MAX_DIFF_BYTES = 512 * 1024              # 超过该大小的旧文件不生成行内 diff
 MAX_READ_FILE_LINES = 2000
 MAX_GREP_RESULTS = 200
 MAX_GREP_CONTEXT_LINES = 5
@@ -131,14 +132,23 @@ def _write_file(path_guard: PathGuard, registry: Optional[object] = None):
                 f"写入内容 {content_bytes} 字节超过 {MAX_WRITE_FILE_BYTES // 1024 // 1024}MB 上限"
             )
         safe = path_guard.resolve_safe(args["path"])
+        before: Optional[str] = None
+        if safe.exists() and safe.is_file() and safe.stat().st_size <= MAX_DIFF_BYTES:
+            try:
+                before = safe.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                before = None
         try:
             parent = safe.parent
             if parent and not parent.exists():
                 parent.mkdir(parents=True, exist_ok=True)
             safe.write_text(content, encoding="utf-8")
-            # LSP 诊断出口钩子（P8，对齐 Java runPostEditLspHook）：
+            # 行内 diff 出口钩子（P11，对齐 Java InlineDiffRenderer）：
             # 内部吞异常，失败不影响写入主结果；registry 缺省时 no-op
             if registry is not None:
+                registry.report_file_write(args["path"], before, content)
+                # LSP 诊断出口钩子（P8，对齐 Java runPostEditLspHook）：
+                # 内部吞异常，失败不影响写入主结果；registry 缺省时 no-op
                 registry.run_post_edit_lsp_hook(args["path"], safe)
             return f"文件已写入: {args['path']}"
         except Exception as e:  # noqa: BLE001

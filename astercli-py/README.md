@@ -1,10 +1,10 @@
-# AsterCLI Python 重写版（P1–P10）
+# AsterCLI Python 重写版（P1–P11）
 
 用 **LangChain + LangGraph** 重写 Java 版 AsterCLI 的核心路径，与仓库根的 Java 版并行演进：
 
 - Java 版 = 生产版本，Python 侧改动不回写 Java 代码
 - 分期路线图：仓库 `.trae/documents/python-langchain-rewrite.md`
-- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）、P9（反思经验：三类触发自动复盘 + Markdown 归档 + `/experience`）、P10（AutoDream：会话转写 + 五道门 + 后台事务化记忆整合 + `/dream`）
+- 当前已交付：P1（配置 + 7 provider + 流式 REPL）、P2（6 内置工具 + LangGraph ReAct + PathGuard/CommandGuard + 预算兜底）、P3（conversationHistory 自动压缩 + `/compact` + 长期记忆 `/save` `/memory`）、P4（HITL interrupt 审批 + `/plan` Plan-Execute + DAG 审阅）、P5（MCP：官方 SDK + 动态工具 + resources mention）、P6（RAG：tree-sitter 分块 + sqlite-vec 向量 + 混合检索）、P7（Multi-Agent `/team` + Skill `/skill` + web 工具）、P8（LSP 诊断：write_file 出口钩子 + 下一轮 user message 注入）、P9（反思经验：三类触发自动复盘 + Markdown 归档 + `/experience`）、P10（AutoDream：会话转写 + 五道门 + 后台事务化记忆整合 + `/dream`）、P11（终端渲染对齐 Java inline 形态：思考活动区 + 工具折叠块 + 行内 diff + 代码围栏折叠 + 底部状态栏）
 
 ## 运行
 
@@ -143,6 +143,18 @@ Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`
 - **与经验/长期记忆的关系**：AutoDream 是唯一允许自动写长期记忆的通道（见 `AGENTS.md` Memory 约束），写入条目带 `metadata.source=dream` 与 `dream_id`；经验仍按 P9 自动复盘，dream 只做跨会话去重与补充
 - **后台线程模型**：CLI 每轮 `asyncio.run` 结束后主事件循环销毁，dream 用守护线程 + 线程内独立事件循环；不碰 prompt_toolkit 输入区，结果只进通知队列
 
+## 终端渲染（P11）
+
+参照 Java 版 `render/inline` 包（`InlineRenderer` / `FoldableBlock` / `ToolCallRenderer` / `InlineDiffRenderer` / `InlineActivityDisplay` / `BottomStatusBar`）对齐内联形态，实现落在 `cli/render_blocks.py`（纯逻辑）、`cli/activity.py`（活动区）、`cli/status_bar.py`（底栏）、`cli/renderer.py`（编排）：
+
+- **思考活动区**：`Thinking... (esc to cancel, 12s)` + 最近 4 行 reasoning 灰字预览，原地重绘（只清理自己打印的行，不碰 transcript / 输入区）；正文或工具调用开始前清空，并把完整 reasoning 以 `│ ` 引用块落到正文区
+- **工具调用折叠块**：按工具名分组，折叠态一行（`⏵ ReadFile(src/a.py) (ctrl+o to expand)` / `⏵ 2 组工具调用 / 3 次`），展开态逐条列出关键参数（path / pattern / command / query / url / name，未知工具回退截断 JSON，MCP 工具显示 `server.tool`）；结果行 `✓` / `✗`，失败红色
+- **Ctrl+O 展开**：绑定在 prompt_toolkit `PromptSession` 上，经 `run_in_terminal` 让出输入区后重绘最近一个折叠块；块高超过可视区域时拒绝展开并提示，避免破坏滚动区域
+- **行内 diff**：`write_file` 成功后由 `ToolRegistry` 出口回调（与 LSP 钩子同级、异常静默），LCS 生成 hunk（上下文 2 行），新增绿 / 删除红 / hunk 青；旧文件超过 512KB 跳过
+- **代码围栏折叠**：流式正文中的 ``` 代码块折叠为 `⏵ code: python (42 行, ctrl+o to expand)`；围栏未闭合（流中断）时按原文输出，避免丢内容
+- **底部状态栏**：prompt_toolkit `bottom_toolbar` 两行——模式 + MCP/Skill 摘要 / `Auto Model · 模型  phase  ctx ▰▰▱▱ 42%  in/out/cache  elapsed  cwd`；token 统计从轮末正文行移入底栏（一次性运行模式仍保留 usage 行）
+- **提交回显**：每轮输入以 `> ` 暗色行写回 transcript（对齐 JLine 提交回显），斜杠命令同样回显
+
 ## 与 Java 版的已知差异
 
 - `grep_code` 暂为纯 Python 扫描引擎（Java 版优先 ripgrep，后续对齐）
@@ -156,3 +168,4 @@ Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`
 - LSP 诊断引擎差异：`.py` 内置 ast + 其余 tree-sitter 多语言（Java 仅 JavaParser 单 .java）；诊断同时进 renderer 显示（Java 只进 conversationHistory）；开关仅环境变量口径（Java 另支持系统属性）
 - 经验子系统为 Python 版独立设计（Java 暂无对应模块，不回写 Java）；存储选 Markdown 文件而非 SQLite / JSON；长期记忆与经验互不替代（事实手动存、经验自动沉淀）
 - AutoDream 为 Python 版独立设计（Java 无对应模块）：会话转写落 jsonl、睡眠式启动门控、事务化 apply + 快照撤销均无 Java 对应实现
+- 渲染层差异：Java 用 JLine Status 托管执行期也可见的 dock，Python 的 `bottom_toolbar` 只在输入态可见；折叠块重绘需主动让出输入区，块高超过可视区域时不就地展开（Java 截断重绘）；`Ctrl+O` 只作用于最近一个块

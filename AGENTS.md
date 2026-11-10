@@ -16,7 +16,7 @@
 - `ASTER.md` 是 AsterCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
 - Banner 版本：`v16.1.0`，Maven 产物：`astercli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
-- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP + P6 RAG + P7 Multi-Agent/Skill/web + P8 LSP 诊断 + P9 反思经验 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
+- Python 重写版位于 `astercli-py/`（LangChain + LangGraph，P1 骨架 + P2 ReAct + P3 Memory + P4 HITL/Plan + P5 MCP + P6 RAG + P7 Multi-Agent/Skill/web + P8 LSP 诊断 + P9 反思经验 + P10 AutoDream + P11 终端渲染对齐 已交付），Java 版继续作为生产版本，Python 侧改动不回写 Java 代码
 
 ## 运行前提
 
@@ -65,6 +65,8 @@ Python 版 P8 起支持 LSP 诊断：进程内解析（非真实 LSP server，�
 Python 版 P9 起支持反思经验（Java 版无对应模块，属 Python 独立设计）：三类触发（工具失败 / 超时 / 策略拒绝、HITL 用户拒绝、LSP error 级诊断）由 registry 出口与 LSP 回调采集，轮末用独立 LLM 调用提炼 `lesson / correct_action / category / confidence`，按内容签名去重合并（hits +1）；落盘为独立 Markdown——项目级 `<项目根>/.astercli/experience/exp-*.md`（可 git 共享）+ 全局 `~/.astercli-py/experience/`（`ASTERCLI_EXPERIENCE_DIR` 可覆盖），目录内维护 `index.md`、单目录上限 200 条按 hits × 时效淘汰；注入走启动期 system prompt 索引段（一次）+ 每轮任务级 top-K user message；`/experience list|search|show|delete|clear|on|off` 管理；护栏 `ASTERCLI_REFLECTION_ENABLED`（默认开）/ `ASTERCLI_REFLECTION_SESSION_LIMIT`（默认 3）/ `ASTERCLI_REFLECTION_TIMEOUT_SECONDS`（默认 30）/ `ASTERCLI_EXPERIENCE_MAX_ENTRIES`（默认 200），解析失败 / 低置信度 / LLM 异常一律丢弃且不影响主任务。
 
 Python 版 P10 起支持 AutoDream 后台记忆整合（Java 版无对应模块，属 Python 独立设计）：每轮最小会话转写（用户原文 / 最终回答 / 工具名，截断 2000 字，不落工具参数与完整输出）按项目哈希写入 `~/.astercli-py/sessions/<hash>/<session-id>.jsonl`；启动期主线程只做五道廉价门检查（开关 → 距上次整合 ≥24h → 距上次扫描 ≥10min → 上次整合后新增 ≥5 会话 → PID 锁，1h 过期抢占），通过后起守护线程 + 线程内独立事件循环（CLI 每轮 `asyncio.run` 结束后主循环销毁），完成通知入队、下一次输入前打印；单次 LLM 调用完成"归纳 → 去重/冲突 → 提炼经验 → 输出 ops"（输入 ≤30k tokens、输出 ≤20 ops、超时 120s），ops 代码侧校验 id 存在性与长度；apply 前对长期记忆 JSON 与全部经验文件做快照，删除一律软删除到 `dream/<hash>/archive/<dream-id>/`，任一落盘失败整体回滚，成功才推进 `state.json`；`/dream`（立即整合）/ `status` / `log <id>` / `undo [id]` / `on|off` 管理；配置 `ASTERCLI_DREAM_ENABLED`（默认开）/ `_MIN_HOURS`（24）/ `_MIN_SESSIONS`（5）/ `_SCAN_INTERVAL_MINUTES`（10）/ `_MODEL`（默认当前模型）/ `_MAX_INPUT_TOKENS`（30000）/ `_TIMEOUT_SECONDS`（120）/ `ASTERCLI_SESSION_LOG`（默认开）/ `ASTERCLI_SESSION_LOG_DIR` / `ASTERCLI_DREAM_DIR`。
+
+Python 版 P11 起对齐 Java 版 inline 终端渲染（参照 `src/main/java/com/astercli/render/inline`）：思考期固定高度活动区（spinner + 已用时间 + 最近 4 行 reasoning 原地重绘，结束后完整内容落 `│ ` 引用块）+ 工具调用折叠块（按工具分组、折叠态一行、展开态列关键参数，`Ctrl+O` 经 prompt_toolkit `run_in_terminal` 重绘最近一块）+ `write_file` 行内 unified diff（`ToolRegistry.set_file_write_listener` 出口回调，与 LSP 钩子同级且异常静默，LCS + 2 行上下文 hunk）+ 正文代码围栏折叠 + prompt_toolkit `bottom_toolbar` 两行状态栏（模式 / 模型 / phase / ctx / in-out-cache / elapsed / cwd，替代轮末 token 行）+ `> ` 提交回显。已知边界：底栏只在输入态可见（Java JLine Status 执行期也可见）、块高超过可视区域时不就地展开、`Ctrl+O` 只作用于最近一个块。
 
 ## 架构概览
 
