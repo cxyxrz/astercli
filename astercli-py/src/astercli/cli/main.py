@@ -107,7 +107,8 @@ def main(argv=None) -> int:
 
     one_shot = " ".join(args.prompt).strip()
     console = Console(highlight=False, markup=False)
-    # 一次性模式没有输入态底栏，保留轮末 usage 行；REPL 交给底部状态栏展示
+    # 底部状态栏：REPL 输入期由 prompt_toolkit 的 bottom_toolbar 渲染；
+    # 一次性模式没有输入态，保持 None，usage() 回到轮末打印 token 行。
     status = None
     if not one_shot:
         status = StatusState(
@@ -316,8 +317,16 @@ class ReplApp:
             status = getattr(self.renderer, "status", None)
             if status is None:
                 return []
-            cols = shutil.get_terminal_size(fallback=(120, 24)).columns
-            return toolbar_fragments(status, cols)
+            # 宽度必须和 prompt_toolkit 当前渲染宽度一致，否则差一列就会折行，
+            # 底栏多出一行会盖住上面的模型输出；减 1 留出边界，避免正好占满折行
+            try:
+                from prompt_toolkit.application import get_app
+
+                cols = max(20, get_app().output.get_size().columns - 1)
+            except Exception:  # noqa: BLE001 —— 非 prompt_toolkit 上下文回退
+                cols = max(20, shutil.get_terminal_size(fallback=(120, 24)).columns - 1)
+            # 状态栏两行输出后再补一个换行，避免和输入行/后续输出贴在一起
+            return toolbar_fragments(status, cols) + [("", "\n")]
 
         session: PromptSession = PromptSession(key_bindings=bindings, bottom_toolbar=_toolbar)
         while True:

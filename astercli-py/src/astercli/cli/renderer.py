@@ -259,7 +259,9 @@ class ConsoleRenderer(NullRenderer):
         if not self._content_buffer:
             return
         remainder, self._content_buffer = self._content_buffer, ""
-        self._emit_text(remainder)
+        # 补换行：流式最后一行通常没有 \n，若直接 end="" 输出，
+        # 下一次 prompt_toolkit 渲染提示符/底栏时会把行坐标算错，造成重叠
+        self._emit_text_line(remainder)
 
     # ---------- 工具调用 / 结果 / diff ----------
 

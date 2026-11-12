@@ -152,7 +152,7 @@ Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`
 - **Ctrl+O 展开**：绑定在 prompt_toolkit `PromptSession` 上，经 `run_in_terminal` 让出输入区后重绘最近一个折叠块；块高超过可视区域时拒绝展开并提示，避免破坏滚动区域
 - **行内 diff**：`write_file` 成功后由 `ToolRegistry` 出口回调（与 LSP 钩子同级、异常静默），LCS 生成 hunk（上下文 2 行），新增绿 / 删除红 / hunk 青；旧文件超过 512KB 跳过
 - **代码围栏折叠**：流式正文中的 ``` 代码块折叠为 `⏵ code: python (42 行, ctrl+o to expand)`；围栏未闭合（流中断）时按原文输出，避免丢内容
-- **底部状态栏**：prompt_toolkit `bottom_toolbar` 两行——模式 + MCP/Skill 摘要 / `Auto Model · 模型  phase  ctx ▰▰▱▱ 42%  in/out/cache  elapsed  cwd`；token 统计从轮末正文行移入底栏（一次性运行模式仍保留 usage 行）
+- **底部状态栏**：`bottom_toolbar` 两行（第一行模式 + MCP/Skill 摘要，第二行模型 / phase / ctx / in-out-cache / elapsed / cwd），两行输出后再补一个换行，避免与输入行贴在一起；有状态栏时 token 统计不再打印轮末 `⚡ tokens ...` 行
 - **提交回显**：每轮输入以 `> ` 暗色行写回 transcript（对齐 JLine 提交回显），斜杠命令同样回显
 
 ## 与 Java 版的已知差异
