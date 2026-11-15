@@ -1,13 +1,12 @@
 """计划审阅交互（对齐 Java PlanReviewInputParser + createPlanReviewHandler）。
 
-键位（与 Java 一致）：
-- Enter      按当前计划执行
-- Ctrl+O     展开完整计划（再按 ESC 折叠回摘要）
-- ESC        已展开时折叠；未展开时取消本次计划
-- I          输入补充要求后重新规划
+输入改为文本菜单（rich 没有按键回调，readline 也拿不到单独 ESC）：
+- Enter       按当前计划执行
+- v           展开完整计划（再次输入 v 折叠回摘要）
+- q           已展开时折叠；未展开时取消本次计划
+- i           输入补充要求后重新规划
 
-方向键等未绑定按键由 prompt_toolkit 解析为独立按键事件（up/down），不会
-误触发 ESC。审阅在 asyncio 事件循环内经 ``asyncio.to_thread`` 执行。
+审阅在 asyncio 事件循环内经 ``asyncio.to_thread`` 执行。
 """
 
 from __future__ import annotations
@@ -52,39 +51,24 @@ def parse_supplement_line(text: Optional[str]) -> PlanReviewDecision:
     return PlanReviewDecision.supplement(trimmed)
 
 
-def _read_review_key() -> Optional[str]:
-    """读单个审阅键：返回 execute / expand / escape / supplement；EOF → None。"""
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.key_binding import KeyBindings
+def parse_review_command(text: Optional[str]) -> str:
+    """审阅菜单解析：execute / expand / cancel / supplement / unknown。"""
+    if text == "\u001B":
+        return "cancel"
+    trimmed = (text or "").strip().lower()
+    if trimmed in ("", "enter", "y", "yes", "run"):
+        return "execute"
+    if trimmed in ("v", "view", "expand"):
+        return "expand"
+    if trimmed in ("q", "quit", "cancel", "esc"):
+        return "cancel"
+    if trimmed in ("i", "input", "edit"):
+        return "supplement"
+    return "unknown"
 
-    kb = KeyBindings()
 
-    @kb.add("enter")
-    def _enter(event):
-        event.app.exit(result="execute")
-
-    @kb.add("c-o")
-    def _expand(event):
-        event.app.exit(result="expand")
-
-    @kb.add("escape")
-    def _escape(event):
-        event.app.exit(result="escape")
-
-    @kb.add("i", eager=True)
-    def _supplement_lower(event):
-        event.app.exit(result="supplement")
-
-    @kb.add("I", eager=True)
-    def _supplement_upper(event):
-        event.app.exit(result="supplement")
-
-    session = PromptSession()
-    try:
-        result = session.prompt("审阅> ", key_bindings=kb)
-    except (EOFError, KeyboardInterrupt):
-        return None
-    return result if isinstance(result, str) else None
+def _read_line(console, prompt: str) -> str:
+    return console.input(prompt) if console is not None else input(prompt)
 
 
 def review_plan_sync(goal: str, plan, console=None) -> PlanReviewDecision:
@@ -92,38 +76,37 @@ def review_plan_sync(goal: str, plan, console=None) -> PlanReviewDecision:
     _print(console, plan.summarize())
     _print(console, "📝 计划已生成。")
     _print(console, "   - 回车：按当前计划执行")
-    _print(console, "   - Ctrl+O：展开完整计划")
-    _print(console, "   - ESC：折叠或取消本次计划")
-    _print(console, "   - I：输入补充要求后重新规划")
+    _print(console, "   - v：展开 / 折叠完整计划")
+    _print(console, "   - q：折叠或取消本次计划")
+    _print(console, "   - i：输入补充要求后重新规划")
 
     expanded = False
     while True:
-        action = _read_review_key()
-        if action is None:
+        try:
+            line = _read_line(console, "审阅> ")
+        except (EOFError, KeyboardInterrupt, OSError):
             return PlanReviewDecision.cancel()
+        action = parse_review_command(line)
         if action == "execute":
             return PlanReviewDecision.execute()
         if action == "expand":
-            _print(console, plan.visualize())
-            expanded = True
-            _print(console, "👆 已展开完整计划，继续按 Enter / Ctrl+O / ESC / I。")
+            expanded = not expanded
+            _print(console, plan.visualize() if expanded else plan.summarize())
             continue
-        if action == "escape":
+        if action == "cancel":
             if expanded:
                 expanded = False
                 _print(console, plan.summarize())
-                _print(console, "📁 已退出完整计划视图，继续按 Enter / Ctrl+O / ESC / I。")
+                _print(console, "📁 已折叠回摘要，继续按 Enter / v / q / i。")
                 continue
             return PlanReviewDecision.cancel()
         if action == "supplement":
             try:
-                line = input("补充> ")
-            except (EOFError, OSError):
+                line = _read_line(console, "补充> ")
+            except (EOFError, KeyboardInterrupt, OSError):
                 return PlanReviewDecision.cancel()
             return parse_supplement_line(line)
-        # 其它按键（未绑定的字母被收入缓冲区后经 Enter 以 execute 退出，
-        # 不会走到这里）；防御性继续循环
-        _print(console, "未识别按键，请按 Enter / Ctrl+O / ESC / I。")
+        _print(console, "未识别输入，请按 Enter / v / q / i。")
 
 
 async def review_plan(goal: str, plan, console=None) -> PlanReviewDecision:

@@ -1,6 +1,6 @@
-"""底部状态栏单测（P11）：两行文案、上下文百分比、宽度裁剪、颜色片段。"""
+"""底部状态区单测：两行文案、上下文百分比、宽度裁剪、富文本分色。"""
 
-from astercli.cli.status_bar import StatusState, format_status_lines, toolbar_fragments
+from astercli.cli.status_bar import StatusState, format_status_lines, status_text
 
 
 def test_两行文案包含模式与模型():
@@ -54,11 +54,12 @@ def test_超宽裁剪到列宽():
     assert display_width(second) <= 40
 
 
-def test_工具栏片段样式分段():
+def test_状态区富文本包含两行与分色片段():
     state = StatusState(model="glm-5.1", phase="thinking", context_tokens=10, context_window=100)
-    fragments = toolbar_fragments(state, 80)
-    texts = [text for _, text in fragments]
-    assert "\n" in texts
-    assert any("glm-5.1" in text for text in texts)
-    assert any("thinking" in text for text in texts)
-    assert sum(len(text) for _, text in fragments) > 0
+    text = status_text(state, 80)
+    lines = text.plain.split("\n")
+    assert len(lines) == 2
+    assert "glm-5.1" in lines[1]
+    assert "thinking" in lines[1]
+    # 第二行由多个带样式的片段拼成，而不是单段纯文本
+    assert len(text.spans) > 1

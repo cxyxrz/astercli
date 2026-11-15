@@ -1,12 +1,12 @@
-"""行内渲染基础块（纯逻辑，不依赖 rich / prompt_toolkit）。
+"""行内渲染基础块（纯逻辑，不依赖 rich）。
 
 参照 Java 版 `render/inline` 包，在 Python 侧提供三样能力：
 
 1. CJK 安全宽度计算与截断（对齐 `InlineRenderer.displayWidth` / `fitToColumns`）；
-2. 可折叠块（对齐 `FoldableBlock`：折叠态一行，展开态多行 + 收起提示）；
-3. 工具调用分组文案与行内 unified diff（对齐 `ToolCallRenderer` / `InlineDiffRenderer`）。
+2. 工具调用分组文案（只保留折叠态一行摘要，展开能力已移除）；
+3. 行内 unified diff（对齐 `InlineDiffRenderer`）。
 
-折叠块本身只维护状态，重绘由 `ConsoleRenderer.toggle_last_block()` 负责。
+实际绘制由 `ConsoleRenderer` 用 rich 组件完成，这里不产生任何 ANSI 输出。
 """
 
 from __future__ import annotations
@@ -14,12 +14,10 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Optional
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-COLLAPSE_FOOTER = "⏷ 收起 (ctrl+o)"
-EXPAND_HINT = "(ctrl+o to expand)"
 KEY_PARAM_MAX_CHARS = 80
 
 
@@ -61,48 +59,6 @@ def fit_to_columns(text: str, cols: int, ellipsis: str = "…") -> str:
         out.append(ch)
         width += step
     return "".join(out) + ellipsis
-
-
-def wrapped_rows(text: str, cols: int) -> int:
-    """估算一段文本在给定列宽下占用的物理行数。"""
-    cols = max(1, cols)
-    rows, col = 0, 0
-    for ch in strip_ansi(text):
-        if ch == "\n":
-            rows += 1
-            col = 0
-            continue
-        col += display_width(ch)
-        if col >= cols:
-            rows += 1
-            col = 0
-    return rows + (1 if col else 0)
-
-
-# ---------- 可折叠块 ----------
-
-
-@dataclass
-class FoldableBlock:
-    """折叠态只占一行，展开态输出完整内容 + 收起提示（对齐 Java FoldableBlock）。"""
-
-    header: str
-    expanded_lines: list[str] = field(default_factory=list)
-    footer: str = COLLAPSE_FOOTER
-    expanded: bool = False
-
-    def toggle(self) -> None:
-        self.expanded = not self.expanded
-
-    def lines(self) -> list[str]:
-        if not self.expanded:
-            return [self.header]
-        if not self.footer:
-            return list(self.expanded_lines)
-        return [*self.expanded_lines, self.footer]
-
-    def rows(self, cols: int) -> int:
-        return sum(max(1, wrapped_rows(line, cols)) for line in self.lines())
 
 
 # ---------- 工具调用文案 ----------
@@ -199,20 +155,9 @@ def collapsed_header(grouped: dict[str, list[dict]]) -> str:
     if len(grouped) == 1:
         name, calls = next(iter(grouped.items()))
         label = call_label(name, calls[0]) if len(calls) == 1 else tool_label(name, len(calls))
-        return f"⏵ {_strip_leading_icon(label)} {EXPAND_HINT}"
+        return f"⏵ {_strip_leading_icon(label)}"
     total = sum(len(calls) for calls in grouped.values())
-    return f"⏵ {len(grouped)} 组工具调用 / {total} 次 {EXPAND_HINT}"
-
-
-def expanded_lines(grouped: dict[str, list[dict]]) -> list[str]:
-    lines: list[str] = []
-    for name, calls in grouped.items():
-        lines.append(f"  {tool_label(name, len(calls))}")
-        for call in calls:
-            detail = key_param(name, call.get("args") or {})
-            if detail:
-                lines.append(f"    └ {detail}")
-    return lines
+    return f"⏵ {len(grouped)} 组工具调用 / {total} 次"
 
 
 def _strip_leading_icon(label: str) -> str:
@@ -223,11 +168,10 @@ def _strip_leading_icon(label: str) -> str:
     return label
 
 
-def build_tool_block(calls: list[dict]) -> Optional[FoldableBlock]:
+def tool_summary(calls: list[dict]) -> Optional[str]:
+    """工具调用折叠态摘要；无调用时返回 None。"""
     grouped = group_calls(calls)
-    if not grouped:
-        return None
-    return FoldableBlock(collapsed_header(grouped), expanded_lines(grouped))
+    return collapsed_header(grouped) if grouped else None
 
 
 def result_is_error(text: str) -> bool:

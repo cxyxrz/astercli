@@ -141,18 +141,17 @@ Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`
 - **可审计可回滚**：一次整合 = 一个 dream-id；`/dream log [id]` 查看摘要与 op 明细，`/dream undo [id]` 按快照还原上一笔（连带回退 state 时间戳）
 - **配置**：`ASTERCLI_DREAM_ENABLED`（默认开）/ `ASTERCLI_DREAM_MIN_HOURS`（24）/ `ASTERCLI_DREAM_MIN_SESSIONS`（5）/ `ASTERCLI_DREAM_SCAN_INTERVAL_MINUTES`（10）/ `ASTERCLI_DREAM_MODEL`（默认当前模型）/ `ASTERCLI_DREAM_MAX_INPUT_TOKENS`（30000）/ `ASTERCLI_DREAM_TIMEOUT_SECONDS`（120）/ `ASTERCLI_SESSION_LOG`（默认开）/ `ASTERCLI_SESSION_LOG_DIR` / `ASTERCLI_DREAM_DIR`
 - **与经验/长期记忆的关系**：AutoDream 是唯一允许自动写长期记忆的通道（见 `AGENTS.md` Memory 约束），写入条目带 `metadata.source=dream` 与 `dream_id`；经验仍按 P9 自动复盘，dream 只做跨会话去重与补充
-- **后台线程模型**：CLI 每轮 `asyncio.run` 结束后主事件循环销毁，dream 用守护线程 + 线程内独立事件循环；不碰 prompt_toolkit 输入区，结果只进通知队列
+- **后台线程模型**：CLI 每轮 `asyncio.run` 结束后主事件循环销毁，dream 用守护线程 + 线程内独立事件循环；不碰输入区，结果只进通知队列
 
-## 终端渲染（P11）
+## 终端渲染（rich）
 
-参照 Java 版 `render/inline` 包（`InlineRenderer` / `FoldableBlock` / `ToolCallRenderer` / `InlineDiffRenderer` / `InlineActivityDisplay` / `BottomStatusBar`）对齐内联形态，实现落在 `cli/render_blocks.py`（纯逻辑）、`cli/activity.py`（活动区）、`cli/status_bar.py`（底栏）、`cli/renderer.py`（编排）：
+参照 Java 版 `render/inline` 包（`InlineRenderer` / `FoldableBlock` / `ToolCallRenderer` / `InlineDiffRenderer` / `InlineActivityDisplay` / `BottomStatusBar`）对齐内联形态，实现落在 `cli/render_blocks.py`（纯逻辑）、`cli/activity.py`（rich Live 活动区）、`cli/status_bar.py`（状态区）、`cli/renderer.py`（编排）。输入层用 `Console.input()` + stdlib `readline`（历史 / 行编辑），不再依赖 prompt_toolkit。
 
-- **思考活动区**：`Thinking... (esc to cancel, 12s)` + 最近 4 行 reasoning 灰字预览，原地重绘（只清理自己打印的行，不碰 transcript / 输入区）；正文或工具调用开始前清空，并把完整 reasoning 以 `│ ` 引用块落到正文区
-- **工具调用折叠块**：按工具名分组，折叠态一行（`⏵ ReadFile(src/a.py) (ctrl+o to expand)` / `⏵ 2 组工具调用 / 3 次`），展开态逐条列出关键参数（path / pattern / command / query / url / name，未知工具回退截断 JSON，MCP 工具显示 `server.tool`）；结果行 `✓` / `✗`，失败红色
-- **Ctrl+O 展开**：绑定在 prompt_toolkit `PromptSession` 上，经 `run_in_terminal` 让出输入区后重绘最近一个折叠块；块高超过可视区域时拒绝展开并提示，避免破坏滚动区域
+- **思考活动区**：`rich.live.Live(transient=True)` 渲染 `Thinking... (ctrl+c to cancel, 12s)` + 最近 4 行 reasoning 灰字预览；结束自动清除，完整 reasoning 以 `│ ` 引用块落到正文区
+- **工具调用摘要**：按工具名分组，只保留折叠态一行（`⏵ ReadFile(src/a.py)` / `⏵ 2 组工具调用 / 3 次`）；结果行 `✓` / `✗`，失败红色；不再提供 Ctrl+O 展开
 - **行内 diff**：`write_file` 成功后由 `ToolRegistry` 出口回调（与 LSP 钩子同级、异常静默），LCS 生成 hunk（上下文 2 行），新增绿 / 删除红 / hunk 青；旧文件超过 512KB 跳过
-- **代码围栏折叠**：流式正文中的 ``` 代码块折叠为 `⏵ code: python (42 行, ctrl+o to expand)`；围栏未闭合（流中断）时按原文输出，避免丢内容
-- **底部状态栏**：`bottom_toolbar` 两行（第一行模式 + MCP/Skill 摘要，第二行模型 / phase / ctx / in-out-cache / elapsed / cwd），两行输出后再补一个换行，避免与输入行贴在一起；有状态栏时 token 统计不再打印轮末 `⚡ tokens ...` 行
+- **代码围栏**：用 `rich.syntax.Syntax` 渲染（保留代码本身，不再折叠）；围栏未闭合（流中断）时按原文输出，避免丢内容
+- **底部状态区**：rich 没有常驻底栏，改为每次提示符前打印两行（第一行模式 + MCP/Skill 摘要，第二行模型 / phase / ctx / in-out-cache / elapsed / cwd）；有状态区时 token 统计不再打印轮末 `⚡ tokens ...` 行
 - **提交回显**：每轮输入以 `> ` 暗色行写回 transcript（对齐 JLine 提交回显），斜杠命令同样回显
 
 ## 与 Java 版的已知差异

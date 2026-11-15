@@ -1,12 +1,12 @@
-"""渲染器。
+"""渲染器（rich 原生实现）。
 
 NullRenderer：无 TUI 基类（测试 / 脚本路径），只累积缓冲不输出；
-ConsoleRenderer：rich + ANSI 实现，参照 Java 版 `render/inline` 包补齐四类能力：
+ConsoleRenderer：全部输出走 rich Console / Text / Syntax / Live，参照 Java 版
+`render/inline` 包补齐三类能力：
 
-1. 思考期固定高度活动区（spinner + 最近 reasoning 预览），结束后落完整引用块；
-2. 工具调用折叠块（`⏵ 读取 3 个文件 (ctrl+o to expand)`），Ctrl+O 由 REPL 触发展开；
-3. 代码围栏折叠（`⏵ code: python (42 行, ctrl+o to expand)`）；
-4. 写文件行内 unified diff。
+1. 思考期活动区（rich `Live`，spinner + 最近 reasoning 预览），结束后落完整引用块；
+2. 工具调用一行摘要（不再提供展开）；
+3. 代码围栏用 `rich.syntax.Syntax` 渲染，写文件行内 unified diff。
 
 reasoning 语义：openai_compat 基类保证每个 chunk 的
 additional_kwargs["reasoning_content"] 是增量片段；take_reasoning() 为 drain 语义
@@ -19,15 +19,11 @@ from __future__ import annotations
 from typing import Optional
 
 from langchain_core.messages import AIMessageChunk
+from rich.syntax import Syntax
+from rich.text import Text
 
 from .activity import make_activity
-from .render_blocks import (
-    FoldableBlock,
-    build_tool_block,
-    render_diff,
-    result_is_error,
-    wrapped_rows,
-)
+from .render_blocks import render_diff, result_is_error, tool_summary
 
 REASONING_KEYS = ("reasoning_content", "reasoning")
 TOOL_PREVIEW_CHARS = 100
@@ -92,9 +88,6 @@ class NullRenderer:
     def echo_input(self, text: str) -> None:
         pass
 
-    def toggle_last_block(self) -> bool:
-        return False
-
     def usage(self, budget) -> None:
         pass
 
@@ -129,10 +122,6 @@ class ConsoleRenderer(NullRenderer):
         self._in_fence = False
         self._fence_lang = ""
         self._fence_lines: list[str] = []
-        self._blocks: list[FoldableBlock] = []
-        # 最近一次折叠块之后的所有输出，Ctrl+O 展开时整体重绘
-        self._tail: list[dict] = []
-        self._tail_rows = 0
 
     # ---------- 状态栏 ----------
 
@@ -155,9 +144,6 @@ class ConsoleRenderer(NullRenderer):
         self._in_fence = False
         self._fence_lang = ""
         self._fence_lines.clear()
-        self._blocks.clear()
-        self._tail.clear()
-        self._tail_rows = 0
         self._set_phase("thinking")
 
     # ---------- 思考区 ----------
@@ -189,7 +175,7 @@ class ConsoleRenderer(NullRenderer):
         super().end_thinking()
         self._close_activity()
         self._flush_content()
-        self._set_phase("tools" if self._blocks else "idle")
+        self._set_phase("idle")
 
     def _close_activity(self) -> None:
         """结束 live 区；若期间有 reasoning，则把完整内容落到正文区。"""
@@ -207,7 +193,7 @@ class ConsoleRenderer(NullRenderer):
         if self._printed_any:
             self._emit_text_line()
         for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            self._emit_styled(f"│ {line}" if line.strip() else "│", "grey50")
+            self._emit_styled_line(f"│ {line}" if line.strip() else "│", "grey50")
         self._emit_text_line()
 
     # ---------- 正文 ----------
@@ -233,16 +219,22 @@ class ConsoleRenderer(NullRenderer):
         self._emit_text(line + "\n")
 
     def _close_fence(self) -> None:
-        language = self._fence_lang or "code"
-        body_count = max(0, len(self._fence_lines) - 2)
-        block = FoldableBlock(
-            header=f"⏵ code: {language} ({body_count} 行, ctrl+o to expand)",
-            expanded_lines=list(self._fence_lines),
-        )
+        body = self._fence_lines[1:-1]
+        language = self._fence_lang or "text"
         self._in_fence = False
         self._fence_lang = ""
         self._fence_lines = []
-        self._emit_block(block)
+        if not body:
+            return
+        if self._printed_any:
+            self._emit_text_line()
+        code = "\n".join(body)
+        try:
+            self._console.print(
+                Syntax(code, language, line_numbers=False, word_wrap=True, background_color="default")
+            )
+        except Exception:  # noqa: BLE001 —— 未知 lexer / 渲染异常时退回纯文本
+            self._emit_text(code + "\n")
 
     def _flush_content(self) -> None:
         if self._in_fence:
@@ -259,8 +251,7 @@ class ConsoleRenderer(NullRenderer):
         if not self._content_buffer:
             return
         remainder, self._content_buffer = self._content_buffer, ""
-        # 补换行：流式最后一行通常没有 \n，若直接 end="" 输出，
-        # 下一次 prompt_toolkit 渲染提示符/底栏时会把行坐标算错，造成重叠
+        # 补换行：流式最后一行通常没有 \n，保留裸行会让下一次提示符紧跟其后
         self._emit_text_line(remainder)
 
     # ---------- 工具调用 / 结果 / diff ----------
@@ -269,9 +260,9 @@ class ConsoleRenderer(NullRenderer):
         super().tool_calls(calls)
         self._close_activity()
         self._flush_content()
-        block = build_tool_block(calls)
-        if block is not None:
-            self._emit_block(block)
+        summary = tool_summary(calls)
+        if summary:
+            self._emit_styled_line(summary, "bold cyan")
         self._set_phase("tools")
 
     def tool_results(self, calls: list, results: list) -> None:
@@ -287,95 +278,24 @@ class ConsoleRenderer(NullRenderer):
 
     def diff(self, path: str, before: Optional[str], after: Optional[str]) -> None:
         super().diff(path, before, after)
+        self._close_activity()
         self._emit_text_line()
         for item in render_diff(path, before, after):
             self._emit_styled_line(item.text, DIFF_STYLES.get(item.kind, ""))
-
-    # ---------- 折叠块展开（Ctrl+O） ----------
-
-    def toggle_last_block(self) -> bool:
-        if not self._blocks:
-            return False
-        rows = _terminal_rows()
-        block = self._blocks[-1]
-        before_rows = self._tail_rows
-        block.toggle()
-        self._tail_rows = self._measure_tail()
-        if before_rows >= rows - 2 or self._tail_rows >= rows - 2:
-            block.toggle()
-            self._tail_rows = before_rows
-            self._emit_styled_line("  （该块超出可视区域，无法就地展开）", "yellow")
-            return False
-        self._redraw_tail()
-        return True
-
-    def _emit_block(self, block: FoldableBlock) -> None:
-        self._blocks.append(block)
-        self._tail = []
-        self._tail_rows = 0
-        self._tail_print_block(block)
-        self._tail_rows += block.rows(self._columns())
-
-    def _redraw_tail(self) -> None:
-        out = self._console.file
-        rows = self._tail_rows
-        if rows <= 0 or out is None:
-            return
-        out.write(f"\x1b[{rows}A\r\x1b[J")
-        out.flush()
-        for entry in self._tail:
-            if entry["kind"] == "block":
-                for line in entry["block"].lines():
-                    self._console.print(line, style="grey50", soft_wrap=True)
-            elif entry["kind"] == "styled":
-                self._console.print(entry["text"], style=entry["style"], soft_wrap=True)
-            else:
-                self._console.print(entry["text"], end="", soft_wrap=True, markup=False, highlight=False)
-        out.flush()
-
-    def _measure_tail(self) -> int:
-        cols = self._columns()
-        rows = 0
-        for entry in self._tail:
-            if entry["kind"] == "block":
-                rows += entry["block"].rows(cols)
-            else:
-                rows += max(1, wrapped_rows(entry["text"], cols))
-        return rows
 
     # ---------- 基础输出 ----------
 
     def _emit_text(self, text: str) -> None:
         self._printed_any = True
         self._console.print(text, end="", soft_wrap=True, markup=False, highlight=False)
-        self._record_tail({"kind": "text", "text": text})
 
     def _emit_text_line(self, text: str = "") -> None:
         self._printed_any = True
         self._console.print(text, soft_wrap=True, markup=False, highlight=False)
-        self._record_tail({"kind": "text", "text": text + "\n"})
 
     def _emit_styled_line(self, text: str, style: str = "") -> None:
         self._printed_any = True
-        self._console.print(text, style=style or None, soft_wrap=True)
-        self._record_tail({"kind": "styled", "text": text, "style": style})
-
-    def _emit_styled(self, text: str, style: str) -> None:
-        self._printed_any = True
-        self._console.print(text, style=style, soft_wrap=False)
-        self._record_tail({"kind": "styled", "text": text, "style": style})
-
-    def _tail_print_block(self, block: FoldableBlock) -> None:
-        self._printed_any = True
-        self._tail.append({"kind": "block", "block": block})
-        for line in block.lines():
-            self._console.print(line, style="grey50", soft_wrap=True)
-
-    def _record_tail(self, entry: dict) -> None:
-        self._tail.append(entry)
-
-    def _columns(self) -> int:
-        return max(20, getattr(self._console, "width", 120))
+        self._console.print(Text(text, style=style or ""), soft_wrap=True)
 
     # ---------- 其他输出 ----------
 
@@ -400,7 +320,7 @@ class ConsoleRenderer(NullRenderer):
 
     def info(self, message: str) -> None:
         self._close_activity()
-        self._console.print(message, style="cyan", markup=False, highlight=False)
+        self._console.print(Text(message, style="cyan"), markup=False, highlight=False)
 
     def echo_input(self, text: str) -> None:
         """提交回显：暗色整行块，对齐 JLine 侧 `>` 前缀写回 transcript。"""
@@ -409,7 +329,7 @@ class ConsoleRenderer(NullRenderer):
 
     def warn(self, message: str) -> None:
         self._close_activity()
-        self._console.print(message, style="yellow", markup=False, highlight=False)
+        self._console.print(Text(message, style="yellow"), markup=False, highlight=False)
 
 
 def _content_text(content) -> list[str]:
@@ -425,9 +345,3 @@ def _content_text(content) -> list[str]:
                 parts.append(block)
         return parts
     return []
-
-
-def _terminal_rows() -> int:
-    import shutil
-
-    return max(10, shutil.get_terminal_size(fallback=(120, 24)).lines)

@@ -1,16 +1,18 @@
-"""底部状态栏（对齐 Java `BottomStatusBar` 的两行 dock）。
+"""底部状态区（对齐 Java `BottomStatusBar` 的两行 dock）。
 
 Java 版由 JLine `Status` 托管底部保留区，输入期和任务执行期都可见；Python 侧
-prompt_toolkit 的 `bottom_toolbar` 只在输入态绑定，因此这里提供两行同构文案：
-第一行 = 模式 + MCP/Skill 摘要，第二行 = 模型 / phase / 上下文 / token / 耗时 / cwd。
+改为在每次提示符前打印两行（rich 没有常驻底栏）：第一行 = 模式 + MCP/Skill 摘要，
+第二行 = 模型 / phase / 上下文 / token / 耗时 / cwd。
 
-纯函数（`format_status_lines`）方便单测；`toolbar_fragments` 只是加颜色的封装。
+`format_status_lines` / `status_text` 都是纯函数，方便单测。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
+from rich.text import Text
 
 from .render_blocks import display_width, fit_to_columns
 
@@ -112,26 +114,32 @@ def _compact_cwd(cwd: str) -> str:
         return cwd
 
 
-def toolbar_fragments(state: StatusState, cols: int) -> list[tuple[str, str]]:
-    """给 prompt_toolkit 的 bottom_toolbar 用：返回 [(style, text), ...]。"""
+def status_text(state: StatusState, cols: int) -> Text:
+    """两行状态区的富文本形态（第一行整段 base 色，第二行字段分色）。"""
     cols = max(20, cols)
     first, second = format_status_lines(state, cols)
-    fragments: list[tuple[str, str]] = [(BASE, first), ("", "\n")]
+    text = Text(first, style=BASE)
+    text.append("\n")
     width = 0
     for index, field in enumerate(_footer_fields(state)):
         if not field:
             continue
         if index:
-            fragments.append((BASE, "  "))
+            text.append("  ", style=BASE)
             width += 2
-        fragments.append((_field_style(field), field))
+        text.append(field, style=_field_style(field))
         width += display_width(field)
     if width > cols:
-        # 超宽时退回单段裁剪，避免 prompt_toolkit 折行撑高底栏
-        return [(BASE, first), ("", "\n"), (BASE, second)]
+        # 超宽时退回整段裁剪，避免折行把状态区撑成三行
+        return Text(first + "\n" + second, style=BASE)
     if width < cols:
-        fragments.append((BASE, " " * (cols - width)))
-    return fragments
+        text.append(" " * (cols - width), style=BASE)
+    return text
+
+
+def print_status(console, state: StatusState) -> None:
+    """在提示符前打印两行状态区。"""
+    console.print(status_text(state, max(20, console.width)))
 
 
 def _footer_fields(state: StatusState) -> list[str]:

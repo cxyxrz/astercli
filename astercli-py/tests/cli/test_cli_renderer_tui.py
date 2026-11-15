@@ -1,4 +1,4 @@
-"""ConsoleRenderer 行为单测：折叠块、代码围栏、diff、状态栏联动（P11）。"""
+"""ConsoleRenderer 行为单测：工具摘要、代码围栏、diff、状态联动。"""
 
 from io import StringIO
 
@@ -29,7 +29,7 @@ def test_工具调用渲染折叠标题与结果行():
     )
     output = stream.getvalue()
     assert "ReadFile(src/a.py)" in output
-    assert "ctrl+o" in output
+    assert "ctrl+o" not in output
     assert "✓ read_file" in output
 
 
@@ -42,13 +42,14 @@ def test_工具失败结果用叉号():
     assert "✗ write_file" in stream.getvalue()
 
 
-def test_代码围栏折叠成块():
+def test_代码围栏用rich语法渲染():
     renderer, stream = _renderer()
     renderer.begin_turn()
     renderer.stream_chunk(_chunk("```python\nprint(1)\nprint(2)\n```\n"))
     output = stream.getvalue()
-    assert "code: python (2 行" in output
-    assert "print(1)" not in output
+    assert "print(1)" in output
+    assert "print(2)" in output
+    assert "```" not in output
 
 
 def test_未闭合围栏按原文输出():
@@ -94,22 +95,6 @@ def test_usage写入状态栏而不打印():
     assert status.output_tokens == 340
     assert status.cached_tokens == 50
     assert stream.getvalue() == ""
-
-
-def test_折叠块可展开重绘():
-    renderer, _ = _renderer()
-    renderer.begin_turn()
-    renderer.tool_calls([{"name": "read_file", "args": {"path": "src/a.py"}}])
-    assert renderer.toggle_last_block() is True
-    block = renderer._blocks[-1]
-    assert block.expanded is True
-    assert any("└ src/a.py" in line for line in block.lines())
-
-
-def test_无折叠块时toggle返回False():
-    renderer, _ = _renderer()
-    renderer.begin_turn()
-    assert renderer.toggle_last_block() is False
 
 
 def test_阶段流转写入状态栏():

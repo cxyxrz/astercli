@@ -239,8 +239,8 @@ class DreamWorker:
     """启动期后台整合：主线程只做廉价门检查，LLM 与写盘都在守护线程。
 
     线程内自建事件循环（``asyncio.run``），因为 CLI 每轮任务结束后主事件循环
-    会被销毁。完成通知不能直接从后台线程打印到 prompt_toolkit 输入区，统一进
-    ``queue.Queue``，由 REPL 在下一次 ``session.prompt`` 前 flush。
+    会被销毁。完成通知不能直接从后台线程打印到输入区，统一进
+    ``queue.Queue``，由 REPL 在下一次读取输入前 flush。
     """
 
     def __init__(

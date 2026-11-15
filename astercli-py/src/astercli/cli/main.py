@@ -76,7 +76,7 @@ from ..rag import (
 )
 from .plan_review import review_plan
 from .renderer import ConsoleRenderer
-from .status_bar import StatusState, toolbar_fragments
+from .status_bar import StatusState, print_status
 
 
 def main(argv=None) -> int:
@@ -107,7 +107,7 @@ def main(argv=None) -> int:
 
     one_shot = " ".join(args.prompt).strip()
     console = Console(highlight=False, markup=False)
-    # 底部状态栏：REPL 输入期由 prompt_toolkit 的 bottom_toolbar 渲染；
+    # 底部状态区：REPL 每次提示符前打印两行（rich 无常驻底栏）；
     # 一次性模式没有输入态，保持 None，usage() 回到轮末打印 token 行。
     status = None
     if not one_shot:
@@ -219,7 +219,7 @@ class ReplApp:
         self._orchestrator: AgentOrchestrator | None = None
         self._rebuild_graph()
         # AutoDream（P10）：启动期只做廉价门检查，通过后守护线程后台整合；
-        # 完成通知入队，下一次输入前由 REPL 统一打印（不抢 prompt_toolkit 输入区）
+        # 完成通知入队，下一次输入前由 REPL 统一打印（不抢输入行）
         self.dream_worker = DreamWorker(
             self.dream_runner,
             self.settings,
@@ -301,43 +301,23 @@ class ReplApp:
 
     def run(self) -> int:
         self._print_banner()
-        import shutil
-
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.key_binding import KeyBindings
-
-        bindings = KeyBindings()
-
-        @bindings.add("c-o")
-        def _expand_last_block(event) -> None:
-            # 折叠块写在 transcript 里，需先把输入区让出来再重绘（对齐 Java Ctrl+O）
-            event.app.run_in_terminal(lambda: self.renderer.toggle_last_block())
-
-        def _toolbar():
-            status = getattr(self.renderer, "status", None)
-            if status is None:
-                return []
-            # 宽度必须和 prompt_toolkit 当前渲染宽度一致，否则差一列就会折行，
-            # 底栏多出一行会盖住上面的模型输出；减 1 留出边界，避免正好占满折行
-            try:
-                from prompt_toolkit.application import get_app
-
-                cols = max(20, get_app().output.get_size().columns - 1)
-            except Exception:  # noqa: BLE001 —— 非 prompt_toolkit 上下文回退
-                cols = max(20, shutil.get_terminal_size(fallback=(120, 24)).columns - 1)
-            # 状态栏两行输出后再补一个换行，避免和输入行/后续输出贴在一起
-            return toolbar_fragments(status, cols) + [("", "\n")]
-
-        session: PromptSession = PromptSession(key_bindings=bindings, bottom_toolbar=_toolbar)
+        console = getattr(self.renderer, "_console", None)
+        readline = _load_readline()
         while True:
             self._flush_dream_notices()
+            self._print_status()
             try:
-                text = session.prompt("* ")
+                text = console.input("* ") if console is not None else input("* ")
             except (KeyboardInterrupt, EOFError):
                 break
             stripped = text.strip()
             if not stripped:
                 continue
+            if readline is not None:
+                try:
+                    readline.add_history(stripped)
+                except Exception:  # noqa: BLE001 —— 历史写入失败不影响输入
+                    pass
             # 提交回显：JLine 侧用 `>` 前缀写回 transcript，这里等价补一行
             self.renderer.echo_input(stripped)
             if stripped.startswith("/"):
@@ -364,6 +344,14 @@ class ReplApp:
                 self._refresh_status(int((time.monotonic() - started) * 1000))
         self.mcp.shutdown()
         return 0
+
+    def _print_status(self) -> None:
+        """提示符前打印两行状态区（无 status 时跳过）。"""
+        console = getattr(self.renderer, "_console", None)
+        status = getattr(self.renderer, "status", None)
+        if console is None or status is None:
+            return
+        print_status(console, status)
 
     def _refresh_status(self, elapsed_ms: int) -> None:
         """刷新底部状态栏：phase 回 idle + 当前上下文 token 估算。"""
@@ -1142,6 +1130,19 @@ def format_experience_detail(entry, path: str = "") -> str:
     if path:
         lines.append(f"   文件: {path}")
     return "\n".join(lines)
+
+
+def _load_readline():
+    """加载 stdlib readline（历史 / 行编辑）；不可用时返回 None。"""
+    try:
+        import readline
+    except ImportError:  # pragma: no cover —— Windows 无 readline
+        return None
+    try:
+        readline.set_history_length(1000)
+    except Exception:  # noqa: BLE001 —— 某些嵌入式环境不支持
+        return None
+    return readline
 
 
 if __name__ == "__main__":

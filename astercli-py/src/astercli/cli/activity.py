@@ -1,23 +1,19 @@
-"""固定高度临时活动区（对齐 Java `InlineActivityDisplay`）。
+"""思考期临时活动区（rich `Live` 实现）。
 
-思考 / 阻塞操作期间在正文区下方维护一块可重绘区域：spinner + 标题 + 已用时间 +
-最近几行 reasoning 预览。只清理自己刚打印过的行，不碰 transcript 与输入区，
-因此不会出现「按屏幕绝对行号清屏」导致的错位。
+思考 / 阻塞操作期间在正文区下方维护一块临时区域：spinner + 标题 + 已用时间 +
+最近几行 reasoning 预览。`Live(transient=True)` 结束时整块清除，完整 reasoning
+由 `ConsoleRenderer` 落到正文引用块，因此不会污染 transcript。
 
-设计取舍：Java 版用 250ms 定时器驱动 spinner；Python 侧在每次 reasoning delta
-到达时重绘（reasoning 流本身就是高频事件），避免额外线程抢 stdout。
+非 TTY（管道 / 测试）下自动降级为 no-op。
 """
 
 from __future__ import annotations
 
-import shutil
+import math
 import time
-from typing import Optional
 
-CLEAR_LINE = "\x1b[2K"
-CLEAR_TO_EOL = "\x1b[K"
-FAINT = "\x1b[2m"
-RESET = "\x1b[0m"
+from rich.live import Live
+from rich.text import Text
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 MAX_REASONING_CHARS = 4096
@@ -27,104 +23,83 @@ MAX_REASONING_ROWS = 4
 class ActivityArea:
     """临时活动面板；非 TTY（管道 / 测试）下自动降级为 no-op。"""
 
-    def __init__(self, out, enabled: bool) -> None:
-        self._out = out
+    def __init__(self, console, enabled: bool) -> None:
+        self._console = console
         self._enabled = enabled
-        self._active = False
+        self._live: Live | None = None
         self._label = "Thinking"
         self._show_cancel_hint = True
         self._reasoning = ""
         self._started = 0.0
         self._frame = 0
-        self._rendered_rows = 0
 
     @property
     def active(self) -> bool:
-        return self._active
+        return self._live is not None
 
     def begin(self, label: str = "Thinking", *, show_cancel_hint: bool = True) -> None:
         if not self._enabled:
             return
-        self._clear()
+        self.end()
         self._label = (label or "Thinking").strip()
         self._show_cancel_hint = show_cancel_hint
         self._reasoning = ""
         self._started = time.monotonic()
         self._frame = 0
-        self._active = True
-        self._render()
+        # get_renderable：每次自动刷新都重算耗时与 spinner，无需额外定时线程
+        self._live = Live(
+            get_renderable=self._build,
+            console=self._console,
+            refresh_per_second=8,
+            transient=True,
+            vertical_overflow="visible",
+        )
+        self._live.start(refresh=True)
 
     def append(self, delta: str) -> None:
         if not delta:
             return
-        if not self._active and self._enabled:
+        if self._live is None and self._enabled:
             self.begin()
         self._reasoning += delta
         if len(self._reasoning) > MAX_REASONING_CHARS:
             self._reasoning = self._reasoning[-MAX_REASONING_CHARS:]
-        if self._active:
-            self._render()
+        if self._live is not None:
+            self._live.refresh()
 
     def end(self) -> bool:
-        """结束并清空区域；返回此前是否真的绘制过内容。"""
-        if not self._active:
+        """结束并清除区域；返回此前是否真的存在活动区。"""
+        live, self._live = self._live, None
+        if live is None:
             return False
-        self._active = False
-        drawn = self._rendered_rows > 0
-        self._clear()
+        live.stop()
         self._reasoning = ""
-        return drawn
+        return True
 
     # ---------- 内部 ----------
 
-    def _render(self) -> None:
-        if not self._active or not self._enabled:
-            return
-        self._clear()
-        lines = self._build_lines()
-        for index, line in enumerate(lines):
-            self._out.write(line + CLEAR_TO_EOL)
-            if index < len(lines) - 1:
-                self._out.write("\n")
-        self._rendered_rows = len(lines)
-        self._frame += 1
-        self._out.flush()
-
-    def _clear(self) -> None:
-        rows = self._rendered_rows
-        if rows <= 0:
-            return
-        if rows > 1:
-            self._out.write(f"\x1b[{rows - 1}A")
-        self._out.write("\r")
-        for index in range(rows):
-            self._out.write(CLEAR_LINE)
-            if index < rows - 1:
-                self._out.write("\n")
-        if rows > 1:
-            self._out.write(f"\x1b[{rows - 1}A")
-        self._out.write("\r")
-        self._rendered_rows = 0
-        self._out.flush()
-
-    def _build_lines(self) -> list[str]:
-        cols = _columns()
+    def _build(self) -> Text:
+        cols = _columns(self._console)
         elapsed = max(0, int(time.monotonic() - self._started))
+        text = Text(style="grey50")
         if not self._show_cancel_hint:
-            return [
-                FAINT + "  ✢ " + self._label + "..." + RESET,
-                FAINT + "    " + _progress_bar(cols) + " " + str(_progress_percent(elapsed)) + "%" + RESET,
-            ]
-        suffix = f" (esc to cancel, {elapsed}s)" if self._show_cancel_hint else f" ({elapsed}s)"
+            text.append(f"  ✢ {self._label}...")
+            text.append("\n")
+            percent = _progress_percent(elapsed)
+            text.append(f"    {_progress_bar(cols, percent)} {percent}%")
+            return text
         spinner = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
-        lines = [FAINT + f"  {spinner} {self._label}..." + suffix + RESET]
+        self._frame += 1
+        text.append(f"  {spinner} {self._label}... (ctrl+c to cancel, {elapsed}s)")
         for line in _reasoning_lines(self._reasoning)[-MAX_REASONING_ROWS:]:
-            lines.append(FAINT + "  │ " + _clip(line, cols - 4) + RESET)
-        return lines
+            text.append("\n")
+            text.append("  │ " + _clip(line, cols - 4))
+        return text
 
 
-def _columns() -> int:
-    return max(20, shutil.get_terminal_size(fallback=(120, 24)).columns - 1)
+def _columns(console) -> int:
+    width = getattr(console, "width", 120) or 120
+    return max(20, width - 1)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -142,23 +117,19 @@ def _reasoning_lines(text: str) -> list[str]:
     return lines
 
 
-def _progress_bar(cols: int) -> str:
+def _progress_bar(cols: int, percent: int) -> str:
     width = max(10, min(40, cols - 12))
-    percent = _progress_percent(0)
     filled = max(1, min(width - 1, round(width * percent / 100)))
     return "▰" * filled + "▱" * (width - filled)
 
 
 def _progress_percent(elapsed_seconds: int) -> int:
     # 与 Java 一致的渐近曲线：15s 达到约 63%，上限 95%
-    import math
-
     curve = 1.0 - math.exp(-max(0, elapsed_seconds) * 1000 / 15_000.0)
     return max(1, min(95, round(curve * 95)))
 
 
 def make_activity(console) -> ActivityArea:
     """按 rich Console 能力创建活动区；非终端自动禁用。"""
-    file = getattr(console, "file", None)
-    enabled = bool(getattr(console, "is_terminal", False)) and file is not None
-    return ActivityArea(file, enabled)
+    enabled = bool(getattr(console, "is_terminal", False))
+    return ActivityArea(console, enabled)

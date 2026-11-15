@@ -52,7 +52,7 @@ uv run pytest            # Python 版测试（549 个）
 
 Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。P9 起支持 `/experience`，P10 起支持 `/dream [status|log|undo|on|off]`（无参数立即整合）。
 
-Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / Ctrl+O 展开 / ESC 取消 / I 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。工具参数在执行前按 Schema 做浅层校验（required / 基本类型 / enum），命令可选 OS 级沙箱（`ASTERCLI_COMMAND_SANDBOX`，与 Java 同名同语义，fail-closed）。
+Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / v 展开 / q 取消 / i 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。工具参数在执行前按 Schema 做浅层校验（required / 基本类型 / enum），命令可选 OS 级沙箱（`ASTERCLI_COMMAND_SANDBOX`，与 Java 同名同语义，fail-closed）。
 
 Python 版 P5 起支持 MCP：基于官方 `mcp` SDK 2.x（ClientSessionGroup 会话池 + 后台线程常驻 event loop，会话跨每轮 `asyncio.run()` 存活）；配置合并用户级 `~/.astercli-py/mcp.json` 与项目级 `.astercli/mcp.json`（与 Java 隔离的用户级目录）；动态工具 `mcp__{server}__{tool}` 一律 dangerous 走 P4 审批通道；resources 虚拟工具、`@server:uri` mention 展开、`/mcp` 管理命令（status/resources/restart/disable/enable）已对齐；HTTP/SSE transport 由官方 SDK 保证（单测仅 stdio 集成）。
 
@@ -66,7 +66,7 @@ Python 版 P9 起支持反思经验（Java 版无对应模块，属 Python 独�
 
 Python 版 P10 起支持 AutoDream 后台记忆整合（Java 版无对应模块，属 Python 独立设计）：每轮最小会话转写（用户原文 / 最终回答 / 工具名，截断 2000 字，不落工具参数与完整输出）按项目哈希写入 `~/.astercli-py/sessions/<hash>/<session-id>.jsonl`；启动期主线程只做五道廉价门检查（开关 → 距上次整合 ≥24h → 距上次扫描 ≥10min → 上次整合后新增 ≥5 会话 → PID 锁，1h 过期抢占），通过后起守护线程 + 线程内独立事件循环（CLI 每轮 `asyncio.run` 结束后主循环销毁），完成通知入队、下一次输入前打印；单次 LLM 调用完成"归纳 → 去重/冲突 → 提炼经验 → 输出 ops"（输入 ≤30k tokens、输出 ≤20 ops、超时 120s），ops 代码侧校验 id 存在性与长度；apply 前对长期记忆 JSON 与全部经验文件做快照，删除一律软删除到 `dream/<hash>/archive/<dream-id>/`，任一落盘失败整体回滚，成功才推进 `state.json`；`/dream`（立即整合）/ `status` / `log <id>` / `undo [id]` / `on|off` 管理；配置 `ASTERCLI_DREAM_ENABLED`（默认开）/ `_MIN_HOURS`（24）/ `_MIN_SESSIONS`（5）/ `_SCAN_INTERVAL_MINUTES`（10）/ `_MODEL`（默认当前模型）/ `_MAX_INPUT_TOKENS`（30000）/ `_TIMEOUT_SECONDS`（120）/ `ASTERCLI_SESSION_LOG`（默认开）/ `ASTERCLI_SESSION_LOG_DIR` / `ASTERCLI_DREAM_DIR`。
 
-Python 版 P11 起对齐 Java 版 inline 终端渲染（参照 `src/main/java/com/astercli/render/inline`）：思考期固定高度活动区（spinner + 已用时间 + 最近 4 行 reasoning 原地重绘，结束后完整内容落 `│ ` 引用块）+ 工具调用折叠块（按工具分组、折叠态一行、展开态列关键参数，`Ctrl+O` 经 prompt_toolkit `run_in_terminal` 重绘最近一块）+ `write_file` 行内 unified diff（`ToolRegistry.set_file_write_listener` 出口回调，与 LSP 钩子同级且异常静默，LCS + 2 行上下文 hunk）+ 正文代码围栏折叠 + prompt_toolkit `bottom_toolbar` 两行状态栏（模式 / 模型 / phase / ctx / in-out-cache / elapsed / cwd，替代轮末 token 行，两行输出后再补一个换行）+ `> ` 提交回显。已知边界：底栏只在输入态可见（Java JLine Status 执行期也可见）、块高超过可视区域时不就地展开、`Ctrl+O` 只作用于最近一个块。
+Python 版 P11 起对齐 Java 版 inline 终端渲染（参照 `src/main/java/com/astercli/render/inline`），实现基于 rich：思考期 `rich.live.Live(transient=True)` 临时活动区（spinner + 已用时间 + 最近 4 行 reasoning，结束后完整内容落 `│ ` 引用块）+ 工具调用一行摘要（按工具分组，不再提供展开）+ `write_file` 行内 unified diff（`ToolRegistry.set_file_write_listener` 出口回调，与 LSP 钩子同级且异常静默，LCS + 2 行上下文 hunk）+ 代码围栏用 `rich.syntax.Syntax` 渲染 + 每次提示符前打印两行状态区（模式 / 模型 / phase / ctx / in-out-cache / elapsed / cwd，替代轮末 token 行）+ `> ` 提交回显。输入层为 `Console.input()` + stdlib `readline`（历史 / 行编辑），不再依赖 prompt_toolkit；`/plan` 审阅改用文本菜单（Enter / v / q / i）。已知边界：状态区是打印式而非常驻底栏（Java JLine Status 执行期也可见）。
 
 ## 架构概览
 

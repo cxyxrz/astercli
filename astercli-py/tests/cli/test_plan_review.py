@@ -1,8 +1,24 @@
-"""计划审阅输入解析测试（parse_supplement_line，Java PlanReviewInputParser 直译）。"""
+"""计划审阅输入解析测试（parse_supplement_line + 文本菜单 parse_review_command）。"""
 
 from __future__ import annotations
 
-from astercli.cli.plan_review import PlanReviewDecision, parse_supplement_line
+from astercli.cli.plan_review import (
+    PlanReviewDecision,
+    parse_review_command,
+    parse_supplement_line,
+)
+
+
+def test_review_command_menu():
+    assert parse_review_command("") == "execute"
+    assert parse_review_command("enter") == "execute"
+    assert parse_review_command("v") == "expand"
+    assert parse_review_command("view") == "expand"
+    assert parse_review_command("q") == "cancel"
+    assert parse_review_command("quit") == "cancel"
+    assert parse_review_command("\u001B") == "cancel"
+    assert parse_review_command("i") == "supplement"
+    assert parse_review_command("帮我加一步") == "unknown"
 
 
 def test_empty_or_confirm_words_execute():

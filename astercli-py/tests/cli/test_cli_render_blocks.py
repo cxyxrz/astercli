@@ -1,12 +1,9 @@
-"""渲染基础块单测：CJK 宽度、折叠块、工具文案、行内 diff（P11）。"""
+"""渲染基础块单测：CJK 宽度、工具文案、行内 diff。"""
 
 from astercli.cli.render_blocks import (
-    FoldableBlock,
-    build_tool_block,
     collapsed_header,
     compute_diff,
     display_width,
-    expanded_lines,
     fit_to_columns,
     group_calls,
     group_hunks,
@@ -15,7 +12,7 @@ from astercli.cli.render_blocks import (
     result_is_error,
     strip_ansi,
     tool_label,
-    wrapped_rows,
+    tool_summary,
 )
 
 
@@ -33,22 +30,6 @@ def test_按列宽截断():
     assert truncated.endswith("…")
 
 
-def test_估算物理行数():
-    assert wrapped_rows("abc", 10) == 1
-    assert wrapped_rows("abcdefghij", 5) == 2
-    assert wrapped_rows("a\nb", 10) == 2
-
-
-def test_折叠块切换():
-    block = FoldableBlock("⏵ header", ["line-1", "line-2"])
-    assert block.lines() == ["⏵ header"]
-    block.toggle()
-    assert block.lines()[0] == "line-1"
-    assert block.lines()[-1].startswith("⏷")
-    block.toggle()
-    assert block.lines() == ["⏵ header"]
-
-
 def test_工具标签与关键参数():
     assert tool_label("read_file", 3) == "📖 读取 3 个文件"
     assert tool_label("mcp__demo__add", 1) == "🔌 调用 MCP 工具 demo.add"
@@ -61,26 +42,22 @@ def test_单次调用折叠标题带具名形态():
     grouped = group_calls([{"name": "read_file", "args": {"path": "src/a.py"}}])
     header = collapsed_header(grouped)
     assert "ReadFile(src/a.py)" in header
-    assert "ctrl+o" in header
+    assert "ctrl+o" not in header
 
 
 def test_多次调用折叠标题按组统计():
-    grouped = group_calls(
-        [
-            {"name": "read_file", "args": {"path": "a"}},
-            {"name": "read_file", "args": {"path": "b"}},
-            {"name": "grep_code", "args": {"pattern": "foo"}},
-        ]
-    )
-    header = collapsed_header(grouped)
+    calls = [
+        {"name": "read_file", "args": {"path": "a"}},
+        {"name": "read_file", "args": {"path": "b"}},
+        {"name": "grep_code", "args": {"pattern": "foo"}},
+    ]
+    header = collapsed_header(group_calls(calls))
     assert "2 组工具调用 / 3 次" in header
-    lines = expanded_lines(grouped)
-    assert any("读取 2 个文件" in line for line in lines)
-    assert any("grep_code" in line or "搜索代码" in line for line in lines)
 
 
-def test_空调用不生成折叠块():
-    assert build_tool_block([]) is None
+def test_空调用不生成摘要():
+    assert tool_summary([]) is None
+    assert tool_summary([{"name": "read_file", "args": {"path": "a"}}]).startswith("⏵ ")
 
 
 def test_结果错误前缀识别():
