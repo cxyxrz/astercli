@@ -60,6 +60,7 @@ from ..skill import (
     SkillContextBuffer,
     default_skill_registry,
     format_index,
+    register_skill_fork_tool,
     register_skill_tool,
 )
 from ..tools import ToolRegistry
@@ -187,6 +188,10 @@ class ReplApp:
         self.skill_registry = default_skill_registry(self.root)
         self.skill_buffer = SkillContextBuffer()
         register_skill_tool(self.registry, self.skill_registry, self.skill_buffer)
+        # Skill 子 agent 隔离：大 skill 任务 fork 到一次性上下文，主对话只收结论
+        register_skill_fork_tool(
+            self.registry, self.skill_registry, runtime, self.settings, renderer=renderer
+        )
         # MCP（P5）：动态工具注册进同一 registry（后台续载的工具实时进 schemas()）；
         # startup 同步最多等 8 秒，超时部分后台续载，不阻塞首屏（对齐 Java）
         self.mcp = McpServerManager(self.registry, self.settings, root=self.root, renderer=renderer)
@@ -901,6 +906,8 @@ class ReplApp:
                 lines.append(f"  [{s.display_source()}] {s.name}{flag}: {desc}")
             lines.append("  /skill show <name> 查看详情 · /skill off|on <name> 禁用/启用 · /skill reload 重载")
             self.renderer.info("\n".join(lines))
+            for warning in self.skill_registry.conflicts():
+                self.renderer.warn(f"skill 冲突: {warning}")
 
         elif sub == "show":
             name = parts[1] if len(parts) > 1 else ""
@@ -947,6 +954,8 @@ class ReplApp:
             self.skill_registry.reload()
             for warning in self.skill_registry.warnings():
                 self.renderer.warn(f"skill 加载警告: {warning}")
+            for warning in self.skill_registry.conflicts():
+                self.renderer.warn(f"skill 冲突: {warning}")
             enabled = self._refresh_skill_index()
             self.renderer.info(f"已重新加载 skill（{len(enabled)} 个启用），system prompt 索引段已更新。")
 
@@ -1068,6 +1077,8 @@ class ReplApp:
                 width=console.width,
             )
         )
+        for warning in self.skill_registry.conflicts():
+            self.renderer.warn(f"skill 冲突: {warning}")
 
 
 # ---------- 纯函数（供 CLI 命令与测试复用） ----------

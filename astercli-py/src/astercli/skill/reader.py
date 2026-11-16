@@ -56,6 +56,27 @@ def list_skill_files(skill: Skill, limit: int = 20) -> List[str]:
     return found
 
 
+def injection_header(skill: Skill) -> str:
+    """注入段头部：把 skill 目录与附属文件暴露给 LLM，第三层（references/）才可寻址。
+
+    ``load_skill``（主上下文）与子 agent fork 共用同一段，保证读取方式一致。
+    """
+    root = skill_root(skill)
+    if root is None:
+        return ""
+    lines = [f"> skill_dir: {root}"]
+    files = list_skill_files(skill)
+    if files:
+        lines.append("> 附属文件: " + ", ".join(files))
+    lines.append(
+        '> 读取方式: 本目录内文件只能用 read_skill_file(name="'
+        + skill.name
+        + '", path="references/xxx.md") 读取；'
+        "不要用 read_file / list_dir / grep_code（它们仅限项目根）。"
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def read_skill_text(
     skill: Skill,
     relative_path: str = SKILL_MD,

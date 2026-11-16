@@ -10,12 +10,45 @@
 
 from __future__ import annotations
 
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional
 
 from .frontmatter import parse
 from .skill import Skill, Source
 from .state_store import SkillStateStore
+
+# 描述冲突检测：归一化后按字符二元组做廉价预筛，再用 SequenceMatcher 精确打分。
+# 阈值 0.75 是"换个说法描述同一件事"的经验分界；低于它的通常只是同领域。
+CONFLICT_SIMILARITY = 0.75
+_CONFLICT_PREFILTER = 0.25
+_CONFLICT_MAX_CHARS = 300
+_NON_WORD_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _normalize_description(text: str) -> str:
+    return _NON_WORD_RE.sub("", (text or "").lower())[:_CONFLICT_MAX_CHARS]
+
+
+def _bigrams(text: str) -> set:
+    if len(text) < 2:
+        return {text} if text else set()
+    return {text[i : i + 2] for i in range(len(text) - 1)}
+
+
+def description_similarity(a: str, b: str) -> float:
+    """两条 description 的相似度（0~1）；对中文换词与英文改写都适用。"""
+    na, nb = _normalize_description(a), _normalize_description(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    ga, gb = _bigrams(na), _bigrams(nb)
+    overlap = len(ga & gb) / max(1, min(len(ga), len(gb)))
+    if overlap < _CONFLICT_PREFILTER:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
 
 class SkillRegistry:
@@ -125,8 +158,33 @@ class SkillRegistry:
             return None
         return self._skills.get(name)
 
+    def resolve(self, name: Optional[str]):
+        """按名取启用 skill，返回 ``(skill, error_text)``；供 load_skill / read_skill_file / fork 共用。"""
+        if not name:
+            return None, "skill 名称不能为空"
+        skill = self.find_skill(name)
+        if skill is not None:
+            return skill, ""
+        if self.find_any_skill(name) is not None:
+            return None, f"Skill '{name}' 已被禁用，可用 /skill on {name} 启用"
+        return None, f"Skill '{name}' 未找到，可用 /skill list 查看可用 skill"
+
     def warnings(self) -> List[str]:
         return list(self._warnings)
+
+    def conflicts(self) -> List[str]:
+        """描述高度相似的启用 skill 对；按需计算，`/skill off` 后立即消失。"""
+        skills = [s for s in self.enabled_skills() if (s.description or "").strip()]
+        found: List[str] = []
+        for i, left in enumerate(skills):
+            for right in skills[i + 1 :]:
+                score = description_similarity(left.description, right.description)
+                if score >= CONFLICT_SIMILARITY:
+                    found.append(
+                        f"描述高度相似（{score:.0%}）: '{left.name}' 与 '{right.name}'，"
+                        "模型可能随机选一个；建议改写 description 或写清适用场景差异"
+                    )
+        return found
 
     def state_store(self) -> SkillStateStore:
         return self._state_store

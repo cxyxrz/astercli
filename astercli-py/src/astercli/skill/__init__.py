@@ -16,8 +16,15 @@ from typing import Optional
 
 from ..tools.registry import Param, ToolRegistry, create_parameters
 from .buffer import SkillContextBuffer
+from .fork import register_skill_fork_tool
 from .index_formatter import format_index
-from .reader import DEFAULT_READ_LINES, SKILL_MD, list_skill_files, read_skill_text, skill_root
+from .reader import (
+    DEFAULT_READ_LINES,
+    SKILL_MD,
+    injection_header,
+    read_skill_text,
+    skill_root,
+)
 from .registry import SkillRegistry
 from .skill import Skill, Source
 from .state_store import SkillStateStore
@@ -47,34 +54,6 @@ def default_skill_registry(project_root: Path) -> SkillRegistry:
     return registry
 
 
-def _resolve_skill(skill_registry: SkillRegistry, name: str):
-    """按名取启用 skill，返回 (skill, error_text)。"""
-    skill = skill_registry.find_skill(name)
-    if skill is not None:
-        return skill, ""
-    if skill_registry.find_any_skill(name) is not None:
-        return None, f"Skill '{name}' 已被禁用，可用 /skill on {name} 启用"
-    return None, f"Skill '{name}' 未找到，可用 /skill list 查看可用 skill"
-
-
-def _injection_header(skill: Skill) -> str:
-    """注入段头部：把 skill 目录与附属文件暴露给 LLM，第三层（references/）才可寻址。"""
-    root = skill_root(skill)
-    if root is None:
-        return ""
-    lines = [f"> skill_dir: {root}"]
-    files = list_skill_files(skill)
-    if files:
-        lines.append("> 附属文件: " + ", ".join(files))
-    lines.append(
-        '> 读取方式: 本目录内文件只能用 read_skill_file(name="'
-        + skill.name
-        + '", path="references/xxx.md") 读取；'
-        "不要用 read_file / list_dir / grep_code（它们仅限项目根）。"
-    )
-    return "\n".join(lines) + "\n\n"
-
-
 def register_skill_tool(
     registry: ToolRegistry, skill_registry: SkillRegistry, skill_buffer: SkillContextBuffer
 ) -> None:
@@ -88,7 +67,7 @@ def register_skill_tool(
         name = str(args.get("name") or "").strip()
         if not name:
             return "load_skill 失败: name 不能为空"
-        skill, error = _resolve_skill(skill_registry, name)
+        skill, error = skill_registry.resolve(name)
         if error:
             return error
         body = skill.body or ""
@@ -106,7 +85,7 @@ def register_skill_tool(
                 f'read_skill_file(name="{name}", path="{SKILL_MD}", offset={consumed + 1}) 续读)'
             )
             truncated_note = "，超长部分可续读"
-        skill_buffer.push(name, _injection_header(skill) + injected)
+        skill_buffer.push(name, injection_header(skill) + injected)
         root = skill_root(skill)
         location = f"；skill_dir={root}" if root is not None else ""
         return (
@@ -118,7 +97,7 @@ def register_skill_tool(
         name = str(args.get("name") or "").strip()
         if not name:
             return "read_skill_file 失败: name 不能为空"
-        skill, error = _resolve_skill(skill_registry, name)
+        skill, error = skill_registry.resolve(name)
         if error:
             return error
         return read_skill_text(

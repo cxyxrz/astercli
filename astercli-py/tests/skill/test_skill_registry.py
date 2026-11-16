@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from astercli.skill import SkillRegistry, SkillStateStore
+from astercli.skill.registry import CONFLICT_SIMILARITY, description_similarity
 from astercli.skill.skill import Source
 
 
@@ -166,3 +167,53 @@ class TestDisabled:
         store_path = tmp_path / "state.json"
         store_path.write_text("not-json{", encoding="utf-8")
         assert SkillStateStore(store_path).disabled() == set()
+
+
+class TestDescriptionConflicts:
+    def _registry(self, tmp_path, *descriptions):
+        project = tmp_path / "project"
+        for i, desc in enumerate(descriptions):
+            write_skill(project, f"skill-{i}", description=desc)
+        registry = SkillRegistry(
+            user_skills_dir=tmp_path / "user",
+            project_skills_dir=project,
+            state_store=SkillStateStore(tmp_path / "state.json"),
+        )
+        registry.reload()
+        return registry
+
+    def test_相似描述给冲突警告(self, tmp_path):
+        registry = self._registry(
+            tmp_path,
+            "生成项目周报，汇总本周提交与待办",
+            "生成项目周报，汇总本周提交和待办",
+        )
+        conflicts = registry.conflicts()
+        assert len(conflicts) == 1
+        assert "skill-0" in conflicts[0]
+        assert "skill-1" in conflicts[0]
+        assert "高度相似" in conflicts[0]
+
+    def test_不同领域不报警(self, tmp_path):
+        registry = self._registry(
+            tmp_path,
+            "生成项目周报，汇总本周提交与待办",
+            "把 PDF 拆分成单页并导出图片",
+        )
+        assert registry.conflicts() == []
+
+    def test_禁用后冲突消失(self, tmp_path):
+        registry = self._registry(
+            tmp_path,
+            "生成项目周报，汇总本周提交与待办",
+            "生成项目周报，汇总本周提交与待办",
+        )
+        assert len(registry.conflicts()) == 1
+        registry.state_store().set_disabled(["skill-1"])
+        assert registry.conflicts() == []
+
+    def test_相似度函数边界(self):
+        assert description_similarity("", "x") == 0.0
+        assert description_similarity("同一条描述", "同一条描述") == 1.0
+        assert description_similarity("把 PDF 拆分成单页", "把PDF拆分成单页。") == 1.0
+        assert description_similarity("生成项目周报", "把 PDF 拆分成单页") < CONFLICT_SIMILARITY

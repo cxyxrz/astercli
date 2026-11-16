@@ -128,6 +128,8 @@ class ToolDef:
     parameters: dict
     func: Callable[[dict], Union[str, Awaitable[str]]]
     dangerous: bool = False
+    # None 表示用 registry 级默认超时；长任务工具（如 skill fork）可单独放宽
+    timeout_seconds: Optional[float] = None
 
 
 class ToolRegistry:
@@ -220,8 +222,11 @@ class ToolRegistry:
         func: Callable[[dict], Union[str, Awaitable[str]]],
         *,
         dangerous: bool = False,
+        timeout_seconds: Optional[float] = None,
     ) -> None:
-        self._tools[name] = ToolDef(name, description, parameters, func, dangerous)
+        self._tools[name] = ToolDef(
+            name, description, parameters, func, dangerous, timeout_seconds
+        )
 
     def get(self, name: str) -> Optional[ToolDef]:
         return self._tools.get(name)
@@ -316,12 +321,13 @@ class ToolRegistry:
                 name=name,
             )
 
+        timeout = tool.timeout_seconds or self._default_timeout
         try:
             content = await asyncio.wait_for(
-                self._invoke(tool, args, semaphore, decision), timeout=self._default_timeout
+                self._invoke(tool, args, semaphore, decision), timeout=timeout
             )
         except asyncio.TimeoutError:
-            content = f"工具执行超时（>{self._default_timeout}s）: {name}"
+            content = f"工具执行超时（>{timeout}s）: {name}"
             self._record_reflection(
                 ReflectionTrigger(
                     kind=TRIGGER_TOOL_FAILURE,
