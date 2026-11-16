@@ -195,6 +195,8 @@ class TestProgressiveDisclosure:
         injected = self.buffer.drain()
         assert "> skill_dir: " in injected
         assert "references/forms.md" in injected
+        assert "read_skill_file" in injected
+        assert "不要用 read_file" in injected
         assert "# 标题" in injected
 
     def test_read_skill_file_只读不审批(self):

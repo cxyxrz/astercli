@@ -66,11 +66,12 @@ def _injection_header(skill: Skill) -> str:
     files = list_skill_files(skill)
     if files:
         lines.append("> 附属文件: " + ", ".join(files))
-        lines.append(
-            '> 读取方式: read_skill_file(name="'
-            + skill.name
-            + '", path="references/xxx.md")；只在正文要求查阅细则时才读取'
-        )
+    lines.append(
+        '> 读取方式: 本目录内文件只能用 read_skill_file(name="'
+        + skill.name
+        + '", path="references/xxx.md") 读取；'
+        "不要用 read_file / list_dir / grep_code（它们仅限项目根）。"
+    )
     return "\n".join(lines) + "\n\n"
 
 
@@ -132,7 +133,9 @@ def register_skill_tool(
         "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" "
         "section in this system prompt). Call this when a skill's description matches the current task. "
         "Pass the exact kebab-case skill name. The full body will appear at the start of your next "
-        "user message under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
+        "user message under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session. "
+        "Files under skill_dir (references/, scripts/, assets/) are outside the project root — read them "
+        "with read_skill_file, never with read_file/list_dir/grep_code.",
         create_parameters(
             Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", True)
         ),
@@ -143,7 +146,8 @@ def register_skill_tool(
         "读取某个 skill 目录内的文件（只读、仅限该 skill 自己的目录）。"
         "load_skill 注入的正文被截断时用它按 offset 续读；或当正文要求查阅 references/ 下的细则时"
         "按需读取（例如 references/forms.md）。path=SKILL.md 返回去 frontmatter 的正文，"
-        "其余文件按行返回且带行号。",
+        "其余文件按行返回且带行号。skill 目录（尤其用户级 ~/.astercli-py/skills/）不在项目根内，"
+        "read_file / list_dir / grep_code 无法访问，必须用本工具。",
         create_parameters(
             Param("name", "string", "skill 名称，与 load_skill 相同", True),
             Param(
