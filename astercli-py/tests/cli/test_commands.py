@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from astercli.cli.main import format_memory_entries, parse_save_payload
+from astercli.cli.main import ReplApp, format_memory_entries, parse_save_payload
 from astercli.memory.long_term import MemoryEntry
 
 
@@ -24,6 +24,25 @@ def test_parse_save_empty():
 
 def test_parse_save_global_without_content():
     assert parse_save_payload("--global") == ("global", "")
+
+
+# ---------- REPL 事件循环 ----------
+
+
+def test_repl_跨轮复用同一个事件循环():
+    """httpx 连接池绑定首次使用的事件循环，逐轮 asyncio.run 会抛 Event loop is closed。"""
+    app = ReplApp.__new__(ReplApp)
+    app._loop = None
+
+    async def noop() -> int:
+        return 1
+
+    assert app._run(noop()) == 1
+    loop = app._loop
+    assert app._run(noop()) == 1
+    assert app._loop is loop
+    app._close_loop()
+    assert app._loop is None
 
 
 # ---------- format_memory_entries ----------

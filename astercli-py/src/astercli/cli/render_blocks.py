@@ -1,9 +1,9 @@
 """行内渲染基础块（纯逻辑，不依赖 rich）。
 
-参照 Java 版 `render/inline` 包，在 Python 侧提供三样能力：
+参照 Java 版 `render/inline` 包，在 Python 侧提供：
 
 1. CJK 安全宽度计算与截断（对齐 `InlineRenderer.displayWidth` / `fitToColumns`）；
-2. 工具调用分组文案（只保留折叠态一行摘要，展开能力已移除）；
+2. 工具结果错误判定；
 3. 行内 unified diff（对齐 `InlineDiffRenderer`）。
 
 实际绘制由 `ConsoleRenderer` 用 rich 组件完成，这里不产生任何 ANSI 输出。
@@ -11,14 +11,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-KEY_PARAM_MAX_CHARS = 80
 
 
 # ---------- 终端宽度 ----------
@@ -61,117 +59,7 @@ def fit_to_columns(text: str, cols: int, ellipsis: str = "…") -> str:
     return "".join(out) + ellipsis
 
 
-# ---------- 工具调用文案 ----------
-
-TOOL_LABELS = {
-    "read_file": "📖 读取 {n} 个文件",
-    "write_file": "✏️ 写入 {n} 个文件",
-    "list_dir": "📂 列出 {n} 个目录",
-    "glob_files": "🔎 匹配 {n} 次文件",
-    "grep_code": "🔍 搜索代码 {n} 次",
-    "execute_command": "⚡ 执行 {n} 条命令",
-    "search_code": "🧠 语义检索 {n} 次",
-    "web_search": "🌐 联网搜索 {n} 次",
-    "web_fetch": "📰 抓取 {n} 个网页",
-    "load_skill": "📚 加载 {n} 个 Skill",
-}
-
-KEY_PARAMS = {
-    "read_file": "path",
-    "write_file": "path",
-    "list_dir": "path",
-    "glob_files": "pattern",
-    "grep_code": "pattern",
-    "execute_command": "command",
-    "search_code": "query",
-    "web_search": "query",
-    "web_fetch": "url",
-    "load_skill": "name",
-}
-
-# 这些工具单次调用时直接用具名形态展示，信息密度更高（对齐 Java toolCollapsedLabel）
-CALL_STYLE_LABELS = {
-    "read_file": "📖 ReadFile({detail})",
-    "list_dir": "📂 ListDir({detail})",
-    "grep_code": "🔍 GrepCode({detail})",
-    "execute_command": "⚡ Shell({detail})",
-    "search_code": "🧠 SearchCode(\"{detail}\")",
-    "web_search": "🌐 WebSearch(\"{detail}\")",
-    "web_fetch": "📰 WebFetch({detail})",
-    "load_skill": "📚 LoadSkill({detail})",
-}
-
-
-def tool_label(name: str, count: int) -> str:
-    template = TOOL_LABELS.get(name)
-    if template:
-        return template.format(n=count)
-    if name.startswith("mcp__"):
-        return _mcp_label(name, count)
-    return f"🔧 {name} × {count}"
-
-
-def _mcp_label(name: str, count: int) -> str:
-    parts = name.split("__", 2)
-    display = f"{parts[1]}.{parts[2]}" if len(parts) == 3 else name
-    return f"🔌 调用 MCP 工具 {display}" + ("" if count == 1 else f" × {count}")
-
-
-def key_param(name: str, args: dict) -> str:
-    """提取工具的关键参数，未知工具回退到截断后的 JSON。"""
-    key = KEY_PARAMS.get(name)
-    if key:
-        value = args.get(key)
-        text = "" if value is None else str(value).replace("\n", " ")
-    else:
-        try:
-            text = json.dumps(args, ensure_ascii=False)
-        except (TypeError, ValueError):
-            text = str(args)
-    if name == "web_fetch" and text:
-        text = re.sub(r"^https?://", "", text).rstrip("/")
-    if len(text) > KEY_PARAM_MAX_CHARS:
-        text = text[: KEY_PARAM_MAX_CHARS - 3] + "..."
-    return text
-
-
-def call_label(name: str, call: dict) -> str:
-    """单次调用的紧凑标签；无法提取关键参数时退回分组标签。"""
-    detail = key_param(name, call.get("args") or {})
-    template = CALL_STYLE_LABELS.get(name)
-    if not template or not detail:
-        return tool_label(name, 1) + (f" · {detail}" if detail else "")
-    return template.format(detail=detail)
-
-
-def group_calls(calls: Iterable[dict]) -> dict[str, list[dict]]:
-    grouped: dict[str, list[dict]] = {}
-    for call in calls:
-        grouped.setdefault(str(call.get("name") or "?"), []).append(call)
-    return grouped
-
-
-def collapsed_header(grouped: dict[str, list[dict]]) -> str:
-    if len(grouped) == 1:
-        name, calls = next(iter(grouped.items()))
-        label = call_label(name, calls[0]) if len(calls) == 1 else tool_label(name, len(calls))
-        return f"⏵ {_strip_leading_icon(label)}"
-    total = sum(len(calls) for calls in grouped.values())
-    return f"⏵ {len(grouped)} 组工具调用 / {total} 次"
-
-
-def _strip_leading_icon(label: str) -> str:
-    """折叠态去掉 emoji 前缀，视觉更紧凑。"""
-    first, _, rest = label.partition(" ")
-    if rest and display_width(first) <= 2:
-        return rest
-    return label
-
-
-def tool_summary(calls: list[dict]) -> Optional[str]:
-    """工具调用折叠态摘要；无调用时返回 None。"""
-    grouped = group_calls(calls)
-    return collapsed_header(grouped) if grouped else None
+# ---------- 工具结果 ----------
 
 
 def result_is_error(text: str) -> bool:

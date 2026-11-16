@@ -20,26 +20,34 @@ def _chunk(content="", reasoning=""):
     return AIMessageChunk(content=content, additional_kwargs=kwargs)
 
 
-def test_工具调用渲染折叠标题与结果行():
+def test_工具调用渲染ToolUse面板():
     renderer, stream = _renderer()
     renderer.begin_turn()
     renderer.tool_calls([{"name": "read_file", "args": {"path": "src/a.py"}}])
+    output = stream.getvalue()
+    assert "Tool Use" in output
+    assert "read_file" in output
+    assert '"path": "src/a.py"' in output
+
+
+def test_工具结果渲染ToolResult面板():
+    renderer, stream = _renderer()
+    renderer.begin_turn()
     renderer.tool_results(
         [], [ToolMessage(content="文件内容: ...", name="read_file", tool_call_id="1")]
     )
     output = stream.getvalue()
-    assert "ReadFile(src/a.py)" in output
-    assert "ctrl+o" not in output
-    assert "✓ read_file" in output
+    assert "Tool Result · read_file · ok" in output
+    assert "文件内容" in output
 
 
-def test_工具失败结果用叉号():
+def test_工具失败结果标记error():
     renderer, stream = _renderer()
     renderer.begin_turn()
     renderer.tool_results(
         [], [ToolMessage(content="工具执行失败: boom", name="write_file", tool_call_id="1")]
     )
-    assert "✗ write_file" in stream.getvalue()
+    assert "Tool Result · write_file · error" in stream.getvalue()
 
 
 def test_代码围栏用rich语法渲染():
@@ -61,13 +69,15 @@ def test_未闭合围栏按原文输出():
     assert "print(1)" in output
 
 
-def test_非终端下推理落到引用块():
+def test_非终端下推理落到Thinking面板():
     renderer, stream = _renderer()
     renderer.begin_turn()
     renderer.begin_thinking()
     renderer.stream_chunk(_chunk(reasoning="先读文件"))
     renderer.end_thinking()
-    assert "│ 先读文件" in stream.getvalue()
+    output = stream.getvalue()
+    assert "Thinking" in output
+    assert "先读文件" in output
 
 
 def test_diff渲染颜色标记():

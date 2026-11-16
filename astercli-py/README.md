@@ -145,13 +145,14 @@ Claude Code 式 auto-dream 的 Python 版实现：把"每次都要手动 `/save`
 
 ## 终端渲染（rich）
 
-参照 Java 版 `render/inline` 包（`InlineRenderer` / `FoldableBlock` / `ToolCallRenderer` / `InlineDiffRenderer` / `InlineActivityDisplay` / `BottomStatusBar`）对齐内联形态，实现落在 `cli/render_blocks.py`（纯逻辑）、`cli/activity.py`（rich Live 活动区）、`cli/status_bar.py`（状态区）、`cli/renderer.py`（编排）。输入层用 `Console.input()` + stdlib `readline`（历史 / 行编辑），不再依赖 prompt_toolkit。
+参照 Java 版 `render/inline` 包（`InlineRenderer` / `FoldableBlock` / `ToolCallRenderer` / `InlineDiffRenderer` / `InlineActivityDisplay` / `BottomStatusBar`）对齐内联形态，实现落在 `cli/render_blocks.py`（纯逻辑）、`cli/panels.py`（圆角面板 + 首屏 banner）、`cli/activity.py`（rich Live 活动区）、`cli/status_bar.py`（状态区）、`cli/renderer.py`（编排）。输入层用 `Console.input()` + stdlib `readline`（历史 / 行编辑），不再依赖 prompt_toolkit。
 
-- **思考活动区**：`rich.live.Live(transient=True)` 渲染 `Thinking... (ctrl+c to cancel, 12s)` + 最近 4 行 reasoning 灰字预览；结束自动清除，完整 reasoning 以 `│ ` 引用块落到正文区
-- **工具调用摘要**：按工具名分组，只保留折叠态一行（`⏵ ReadFile(src/a.py)` / `⏵ 2 组工具调用 / 3 次`）；结果行 `✓` / `✗`，失败红色；不再提供 Ctrl+O 展开
+- **首屏 banner**：左侧粗块 `A` logo + 版本 / `Signed in API Key` + 右侧 `What's new` 面板，下方一条分隔线与右对齐的 `/help for commands` 提示
+- **思考活动区**：`rich.live.Live(transient=True)` 渲染 `Thinking... (ctrl+c to cancel, 12s)` + 最近 4 行 reasoning 灰字预览；结束自动清除，完整 reasoning 落到紫色边框的 `Thinking` 圆角面板
+- **工具调用 / 结果面板**：每次调用渲染黄色边框 `Tool Use` 面板（`name` + `input` JSON），结果渲染绿色 `Tool Result · {tool} · ok`（失败红色 + `error`）；单次结果最多 12 行 / 1600 字符，超出截断
 - **行内 diff**：`write_file` 成功后由 `ToolRegistry` 出口回调（与 LSP 钩子同级、异常静默），LCS 生成 hunk（上下文 2 行），新增绿 / 删除红 / hunk 青；旧文件超过 512KB 跳过
 - **代码围栏**：用 `rich.syntax.Syntax` 渲染（保留代码本身，不再折叠）；围栏未闭合（流中断）时按原文输出，避免丢内容
-- **底部状态区**：rich 没有常驻底栏，改为每次提示符前打印两行（第一行模式 + MCP/Skill 摘要，第二行模型 / phase / ctx / in-out-cache / elapsed / cwd）；有状态区时 token 统计不再打印轮末 `⚡ tokens ...` 行
+- **状态区**：rich 没有常驻底栏，改为每次提示符前打印两行——第一行 `0 AGENTS.md files · 0 MCP servers · 0 skills · Tools 0`，第二行模型 + 上下文占用条与百分比 + 工作目录（有 token 统计时末尾补暗色字段）；有状态区时 token 统计不再打印轮末 `⚡ tokens ...` 行
 - **提交回显**：每轮输入以 `> ` 暗色行写回 transcript（对齐 JLine 提交回显），斜杠命令同样回显
 
 ## 与 Java 版的已知差异

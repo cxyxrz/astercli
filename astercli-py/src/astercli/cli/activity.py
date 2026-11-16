@@ -81,16 +81,18 @@ class ActivityArea:
     def _build(self) -> Text:
         cols = _columns(self._console)
         elapsed = max(0, int(time.monotonic() - self._started))
-        text = Text(style="grey50")
+        text = Text(style="#8b949e")
         if not self._show_cancel_hint:
-            text.append(f"  ✢ {self._label}...")
+            text.append(f"  ✢ {self._label}...", style="bold #a78bfa")
             text.append("\n")
             percent = _progress_percent(elapsed)
-            text.append(f"    {_progress_bar(cols, percent)} {percent}%")
+            text.append(f"    {_progress_bar(cols, percent)} {percent}%", style="#7ee787")
             return text
         spinner = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
         self._frame += 1
-        text.append(f"  {spinner} {self._label}... (ctrl+c to cancel, {elapsed}s)")
+        text.append(
+            f"  {spinner} {self._label}... (ctrl+c to cancel, {elapsed}s)", style="bold #a78bfa"
+        )
         for line in _reasoning_lines(self._reasoning)[-MAX_REASONING_ROWS:]:
             text.append("\n")
             text.append("  │ " + _clip(line, cols - 4))

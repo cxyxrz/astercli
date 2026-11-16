@@ -23,10 +23,10 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from .activity import make_activity
-from .render_blocks import render_diff, result_is_error, tool_summary
+from .panels import thinking_panel, tool_result_panel, tool_use_panel
+from .render_blocks import render_diff, result_is_error
 
 REASONING_KEYS = ("reasoning_content", "reasoning")
-TOOL_PREVIEW_CHARS = 100
 
 DIFF_STYLES = {
     "header": "bold cyan",
@@ -192,9 +192,8 @@ class ConsoleRenderer(NullRenderer):
             return
         if self._printed_any:
             self._emit_text_line()
-        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            self._emit_styled_line(f"│ {line}" if line.strip() else "│", "grey50")
-        self._emit_text_line()
+        self._printed_any = True
+        self._console.print(thinking_panel(text))
 
     # ---------- 正文 ----------
 
@@ -260,9 +259,12 @@ class ConsoleRenderer(NullRenderer):
         super().tool_calls(calls)
         self._close_activity()
         self._flush_content()
-        summary = tool_summary(calls)
-        if summary:
-            self._emit_styled_line(summary, "bold cyan")
+        for call in calls:
+            name = str(call.get("name") or "?")
+            if self._printed_any:
+                self._emit_text_line()
+            self._printed_any = True
+            self._console.print(tool_use_panel(name, call.get("args") or {}))
         self._set_phase("tools")
 
     def tool_results(self, calls: list, results: list) -> None:
@@ -270,10 +272,10 @@ class ConsoleRenderer(NullRenderer):
         for message in results:
             content = str(getattr(message, "content", "") or "")
             name = str(getattr(message, "name", "") or "?")
-            failed = result_is_error(content)
-            preview = " ".join(content.split())[:TOOL_PREVIEW_CHARS]
-            mark = "✗" if failed else "✓"
-            self._emit_styled_line(f"  {mark} {name}: {preview}", "red" if failed else "grey50")
+            if self._printed_any:
+                self._emit_text_line()
+            self._printed_any = True
+            self._console.print(tool_result_panel(name, content, ok=not result_is_error(content)))
         self._set_phase("thinking")
 
     def diff(self, path: str, before: Optional[str], after: Optional[str]) -> None:

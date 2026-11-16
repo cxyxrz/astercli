@@ -1,18 +1,13 @@
-"""渲染基础块单测：CJK 宽度、工具文案、行内 diff。"""
+"""渲染基础块单测：CJK 宽度、结果判定、行内 diff。"""
 
 from astercli.cli.render_blocks import (
-    collapsed_header,
     compute_diff,
     display_width,
     fit_to_columns,
-    group_calls,
     group_hunks,
-    key_param,
     render_diff,
     result_is_error,
     strip_ansi,
-    tool_label,
-    tool_summary,
 )
 
 
@@ -28,36 +23,6 @@ def test_按列宽截断():
     truncated = fit_to_columns("读取文件路径", 6)
     assert display_width(truncated) <= 6
     assert truncated.endswith("…")
-
-
-def test_工具标签与关键参数():
-    assert tool_label("read_file", 3) == "📖 读取 3 个文件"
-    assert tool_label("mcp__demo__add", 1) == "🔌 调用 MCP 工具 demo.add"
-    assert key_param("read_file", {"path": "src/a.py"}) == "src/a.py"
-    assert key_param("web_fetch", {"url": "https://example.com/a/"}) == "example.com/a"
-    assert key_param("read_file", {"path": "x" * 200}).endswith("...")
-
-
-def test_单次调用折叠标题带具名形态():
-    grouped = group_calls([{"name": "read_file", "args": {"path": "src/a.py"}}])
-    header = collapsed_header(grouped)
-    assert "ReadFile(src/a.py)" in header
-    assert "ctrl+o" not in header
-
-
-def test_多次调用折叠标题按组统计():
-    calls = [
-        {"name": "read_file", "args": {"path": "a"}},
-        {"name": "read_file", "args": {"path": "b"}},
-        {"name": "grep_code", "args": {"pattern": "foo"}},
-    ]
-    header = collapsed_header(group_calls(calls))
-    assert "2 组工具调用 / 3 次" in header
-
-
-def test_空调用不生成摘要():
-    assert tool_summary([]) is None
-    assert tool_summary([{"name": "read_file", "args": {"path": "a"}}]).startswith("⏵ ")
 
 
 def test_结果错误前缀识别():

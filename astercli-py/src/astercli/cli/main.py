@@ -74,9 +74,13 @@ from ..rag import (
     format_for_cli,
     register_rag_tool,
 )
+from .panels import startup_banner
 from .plan_review import review_plan
 from .renderer import ConsoleRenderer
 from .status_bar import StatusState, print_status
+
+# 首屏状态区统计的"项目指令文件"：项目根与 .astercli/ 下的 AGENTS.md
+AGENT_FILES = ("AGENTS.md", ".astercli/AGENTS.md")
 
 
 def main(argv=None) -> int:
@@ -141,6 +145,8 @@ class ReplApp:
         self.settings = settings
         self.renderer = renderer
         self.root = root.resolve()
+        # REPL 生命周期内复用的事件循环（每轮 asyncio.run 会让 httpx 连接池绑定到已关闭的循环）
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.path_guard = PathGuard(self.root)
         # HITL 审批：interrupt 挂起 → 终端收集决策 → Command(resume) 恢复；
         # 会话级"全部放行"名单挂在 ApprovalSession 上（/clear 清空）
@@ -233,12 +239,13 @@ class ReplApp:
         self.dream_worker.start()
 
     def _dream_runtime(self):
-        """dream 专用 runtime：ASTERCLI_DREAM_MODEL 覆盖当前 provider 的模型。"""
-        override = self.settings.dream_model()
-        if not override:
-            return self.runtime
-        dream_runtime = create_client(self.runtime.provider, self.settings, model=override)
-        return dream_runtime or self.runtime
+        """dream 专用 runtime：始终独立建客户端。
+
+        后台整合线程与主 REPL 各用各的事件循环，共享同一个 ``httpx.AsyncClient``
+        会让连接池绑定到已被关闭的循环。
+        """
+        override = self.settings.dream_model() or self.runtime.model
+        return create_client(self.runtime.provider, self.settings, model=override) or self.runtime
 
     def _rebuild_graph(self) -> None:
         """按当前 runtime 重建压缩器与 ReAct 图 / Plan Agent（/model 切换后复用）。"""
@@ -333,17 +340,40 @@ class ReplApp:
                 self._next_use_team = False
                 self.renderer.begin_turn()
                 if use_team:
-                    asyncio.run(self.run_team_turn(stripped))
+                    self._run(self.run_team_turn(stripped))
                 elif use_plan:
-                    asyncio.run(self.run_plan_turn(stripped))
+                    self._run(self.run_plan_turn(stripped))
                 else:
-                    asyncio.run(self.run_turn(stripped))
+                    self._run(self.run_turn(stripped))
                 self._refresh_status(int((time.monotonic() - started) * 1000))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 self.renderer.warn("⏹️ 已取消当前任务。")
                 self._refresh_status(int((time.monotonic() - started) * 1000))
         self.mcp.shutdown()
+        self._close_loop()
         return 0
+
+    def _run(self, coro):
+        """在 REPL 进程内复用同一个事件循环。
+
+        LLM / web 客户端的 ``httpx.AsyncClient`` 连接池会绑定首次使用时的事件循环；
+        每轮 ``asyncio.run`` 新建并关闭循环后，下一轮再复用同一连接池会抛
+        ``RuntimeError: Event loop is closed``。
+        """
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
+            self._loop = None
 
     def _print_status(self) -> None:
         """提示符前打印两行状态区（无 status 时跳过）。"""
@@ -351,6 +381,7 @@ class ReplApp:
         status = getattr(self.renderer, "status", None)
         if console is None or status is None:
             return
+        self._sync_status_counts()
         print_status(console, status)
 
     def _refresh_status(self, elapsed_ms: int) -> None:
@@ -368,6 +399,18 @@ class ReplApp:
             context_window=self.runtime.context_window,
             context_tokens=context_tokens,
             elapsed_ms=elapsed_ms,
+        )
+
+    def _sync_status_counts(self) -> None:
+        """状态区第一行的资产统计（MCP / Skill 数量会随后台加载变化）。"""
+        status = getattr(self.renderer, "status", None)
+        if status is None:
+            return
+        status.update(
+            agents_files=count_agent_files(self.root),
+            mcp_servers=self.mcp.server_count,
+            skills=len(self.skill_registry.enabled_skills()),
+            tools=len(self.registry.names()),
         )
 
     # ---------- 单轮执行 ----------
@@ -516,13 +559,13 @@ class ReplApp:
             self._compact_history()
         elif cmd == "/plan":
             if payload:
-                asyncio.run(self.run_plan_turn(payload))
+                self._run(self.run_plan_turn(payload))
             else:
                 self._next_use_plan = True
                 self.renderer.info("计划模式已开启，下一条输入将进入任务规划与审阅。")
         elif cmd == "/team":
             if payload:
-                asyncio.run(self.run_team_turn(payload))
+                self._run(self.run_team_turn(payload))
             else:
                 self._next_use_team = True
                 self.renderer.info("多 Agent 协作模式已开启，下一条输入将进入团队协作。")
@@ -572,7 +615,7 @@ class ReplApp:
 
     def _compact_history(self) -> None:
         """手动压缩：跳过阈值，保留最近 1 个 user 轮次。"""
-        rebuilt = asyncio.run(self.compactor.compact_now(self.history))
+        rebuilt = self._run(self.compactor.compact_now(self.history))
         if rebuilt is None:
             self.renderer.info("当前历史较短，没有可压缩的早期轮次。")
             return
@@ -670,7 +713,7 @@ class ReplApp:
     def _run_dream_now(self) -> None:
         """手动触发一次整合（忽略时间 / 会话门，仍走锁与事务回滚）。"""
         self.renderer.info("🧠 正在整理记忆（后台同款流程，稍候）…")
-        message = asyncio.run(self.dream_worker.run_now())
+        message = self._run(self.dream_worker.run_now())
         if self.dream_worker.dirty:
             self.dream_worker.clear_dirty()
             self._refresh_experience_index()
@@ -815,7 +858,7 @@ class ReplApp:
         if not server:
             self.renderer.warn(f"用法: /mcp {sub} <server>")
         elif sub == "resources":
-            self.renderer.info(asyncio.run(self.mcp.list_resources_async(server)))
+            self.renderer.info(self._run(self.mcp.list_resources_async(server)))
         elif sub == "restart":
             if self.mcp.restart(server):
                 self.renderer.info(f"🔄 MCP server '{server}' 正在重连（/mcp 查看进度）。")
@@ -1011,20 +1054,19 @@ class ReplApp:
         if console is None:
             print(f"AsterCLI Python v{__version__} | {self.runtime.display_name}")
             return
-        console.print(f"AsterCLI Python v{__version__}", style="bold cyan")
-        enabled_skills = len(self.skill_registry.enabled_skills())
         console.print(
-            f"模型: {self.runtime.display_name} · 工具: {len(self.registry.names())} 个"
-            f"（{self.settings.tool_mode()} 模式） · Skill: {enabled_skills} 个"
-            f" · AutoDream: {'开' if self.dream_worker.enabled else '关'}"
-            f" · 项目根: {self.root}",
-            style="grey50",
-        )
-        console.print(
-            "命令: /model 切换 · /tools 工具 · /plan 计划模式 · /team 多 Agent 协作 · "
-            "/skill 管理 Skill · /experience 经验 · /dream 记忆整合 · /compact 压缩 · "
-            "/save 与 /memory 记忆 · /index 与 /search 语义检索 · /clear 清空 · /quit 退出",
-            style="grey50",
+            startup_banner(
+                title="AsterCLI",
+                version=__version__,
+                subtitle="Signed in API Key",
+                bullets=(
+                    "A logo home layout for the interactive CLI",
+                    "MCP, skills, tools, and workspace status at a glance",
+                    "Use /help for commands and /model for runtime settings",
+                ),
+                hint="/help for commands",
+                width=console.width,
+            )
         )
 
 
@@ -1036,6 +1078,11 @@ def _fmt_ts(ts: float) -> str:
     if not ts:
         return "从未"
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def count_agent_files(root: Path) -> int:
+    """统计项目内存在的 AGENTS.md（首屏状态区第一行的资产统计）。"""
+    return sum(1 for rel in AGENT_FILES if (root / rel).is_file())
 
 
 def _last_ai_text(messages: list) -> str:

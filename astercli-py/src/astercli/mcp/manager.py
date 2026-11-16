@@ -110,6 +110,11 @@ class McpServerManager:
         if self._servers:
             self._info(self.startup_summary())
 
+    @property
+    def server_count(self) -> int:
+        """已配置的 MCP server 数量（首屏状态区展示，含启动中 / 失败 / 禁用）。"""
+        return len(self._servers)
+
     def startup_summary(self) -> str:
         if not self._servers:
             return "MCP: 无配置 server。"
