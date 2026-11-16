@@ -111,7 +111,8 @@ uv run pytest                            # 全量单测
 - **三层目录**：`~/.astercli-py/skills/<name>/SKILL.md`（用户级）+ `<项目根>/.astercli/skills/<name>/SKILL.md`（项目级，同名整体覆盖）
 - **SKILL.md**：frontmatter（name/description/version/author/tags，零 PyYAML 解析器，嵌套对象降级警告）+ body 指引正文
 - **索引段**：启用 skill 列表注入 system prompt 末尾（≤20 个 / ≤4KB，`/skill off|on|reload` 即时刷新）
-- **load_skill 工具**：LLM 按索引段触发场景调用，body 经 `SkillContextBuffer`（LRU≤3）前置注入下一轮 user message（`## 已加载 Skill：<name>` 段）；`/clear` 清空 buffer
+- **load_skill 工具**：LLM 按索引段触发场景调用，body 经 `SkillContextBuffer`（LRU≤3）前置注入下一轮 user message（`## 已加载 Skill：<name>` 段）；注入段头部带 `skill_dir` 与附属文件清单；`/clear` 清空 buffer
+- **read_skill_file 工具**：按需分页读取该 skill 目录内 `references/` 等附属文件（渐进披露第三层）。以 skill 目录为根的 PathGuard 围栏，补 `read_file` 只认项目根、读不到 `~/.astercli-py/skills/` 的缺口；body 超 5KB 时 `load_skill` 会按行截断并给出续读 `offset`
 - **启用状态**：`~/.astercli-py/skills.json` 持久化 disabled 列表
 
 ### Web 工具

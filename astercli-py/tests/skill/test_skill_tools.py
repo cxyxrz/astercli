@@ -145,8 +145,11 @@ class TestLoadSkillTool:
         )
         tool = self.registry.get("load_skill")
         out = tool.func({"name": "big"})
-        assert "已截断" in out
-        assert len(self.buffer.drain()) < 5 * 1024 + 100
+        assert "可续读" in out
+        drained = self.buffer.drain()
+        assert len(drained) < 5 * 1024 + 300
+        assert "read_skill_file" in drained
+        assert "offset=" in drained
 
     async def test_禁用_skill_提示启用路径(self):
         self.skill_registry.state_store().set_disabled(["demo"])
@@ -154,3 +157,87 @@ class TestLoadSkillTool:
         out = tool.func({"name": "demo"})
         assert "已被禁用" in out
         assert "/skill on demo" in out
+
+
+class TestProgressiveDisclosure:
+    """第三层披露：skill 目录可寻址 + 附属文件按需读取。"""
+
+    def setup_method(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        project = base / "project"
+        skill_dir = project / "demo"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: 演示\n---\n# 标题\n\n第一段\n第二段\n第三段\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "references" / "forms.md").write_text(
+            "表单细则\n第二行\n", encoding="utf-8"
+        )
+        self.settings = Settings(env={}, load_files=False)
+        self.registry = ToolRegistry(settings=self.settings)
+        self.skill_registry = SkillRegistry(
+            user_skills_dir=None,
+            project_skills_dir=project,
+            state_store=SkillStateStore(base / "skills.json"),
+        )
+        self.skill_registry.reload()
+        self.buffer = SkillContextBuffer()
+        register_skill_tool(self.registry, self.skill_registry, self.buffer)
+
+    def teardown_method(self):
+        self._tmp.cleanup()
+
+    def test_注入段带_skill_dir_与附属文件(self):
+        out = self.registry.get("load_skill").func({"name": "demo"})
+        assert "skill_dir=" in out
+        injected = self.buffer.drain()
+        assert "> skill_dir: " in injected
+        assert "references/forms.md" in injected
+        assert "# 标题" in injected
+
+    def test_read_skill_file_只读不审批(self):
+        assert self.registry.get("read_skill_file").dangerous is False
+
+    def test_默认读_SKILL_正文且剥离_frontmatter(self):
+        out = self.registry.get("read_skill_file").func({"name": "demo"})
+        assert "SKILL.md 正文（frontmatter 已剥离）" in out
+        assert "第一段" in out
+        assert "description: 演示" not in out
+
+    def test_offset_limit_续读(self):
+        out = self.registry.get("read_skill_file").func(
+            {"name": "demo", "offset": 3, "limit": 2}
+        )
+        assert "lines 3-4" in out
+        assert "第二段" in out
+
+    def test_读取_references_附属文件(self):
+        out = self.registry.get("read_skill_file").func(
+            {"name": "demo", "path": "references/forms.md"}
+        )
+        assert "references/forms.md" in out
+        assert "表单细则" in out
+
+    def test_读取子目录_返回列表(self):
+        out = self.registry.get("read_skill_file").func({"name": "demo", "path": "references"})
+        assert "目录内容: references" in out
+        assert "- forms.md" in out
+
+    def test_路径逃逸被拒(self):
+        out = self.registry.get("read_skill_file").func(
+            {"name": "demo", "path": "../../etc/passwd"}
+        )
+        assert "读取 skill 文件失败" in out
+        assert "路径越界" in out
+        assert "root:" not in out
+
+    def test_禁用_skill_拒绝读取(self):
+        self.skill_registry.state_store().set_disabled(["demo"])
+        out = self.registry.get("read_skill_file").func({"name": "demo"})
+        assert "已被禁用" in out
+
+    def test_未知_skill(self):
+        out = self.registry.get("read_skill_file").func({"name": "nope"})
+        assert "未找到" in out
