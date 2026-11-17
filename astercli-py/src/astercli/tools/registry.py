@@ -15,8 +15,10 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Tuple, Union
+from uuid import uuid4
 
 from langchain_core.messages import ToolMessage
 
@@ -30,6 +32,13 @@ from ..experience.models import (
 from ..hitl.policy import requires_approval
 from ..lsp import EMPTY_REPORT, LspDiagnosticReport
 from ..policy import PolicyException, record_audit
+
+# ---------- 第 1 层压缩：大结果存磁盘 ----------
+# 结果超过阈值时落盘到 <项目根>/.astercli/offload/，上下文只保留预览 + 指针，
+# 需要细节时由模型自己 read_file 分段读取（同样受 PathGuard 围栏）。
+OFFLOAD_THRESHOLD_CHARS = 12_000
+OFFLOAD_PREVIEW_CHARS = 2_000
+OFFLOAD_SKIP_TOOLS = frozenset({"write_file", "revert_turn"})
 
 
 # ---------- 参数与 Schema（对齐 Java createParameters / Param record） ----------
@@ -158,11 +167,49 @@ class ToolRegistry:
         self._file_write_listener = None
         # 经验反思采集器（P9）：None 表示不采集触发信号
         self._reflection = reflection
+        # 大结果落盘根（项目根）：None 表示关闭第 1 层压缩
+        self._offload_root: Optional[Path] = None
 
     def set_hitl_active(self, active: bool) -> None:
         """运行期开关 HITL 层（build_react_graph 在 checkpointer 缺失时调用：
         审批需要 resume 能力，缺失时整体禁用，危险工具直接执行）。"""
         self._hitl_active = bool(active)
+
+    # ---------- 大结果落盘（第 1 层压缩） ----------
+
+    def set_offload_root(self, root: Optional[Path]) -> None:
+        """挂载落盘根（项目根）；None 表示关闭该层。"""
+        self._offload_root = Path(root).resolve() if root else None
+
+    def offload_dir(self) -> Optional[Path]:
+        return self._offload_root / ".astercli" / "offload" if self._offload_root else None
+
+    def _maybe_offload(self, name: str, args: dict, content: str) -> str:
+        """超过阈值的结果写盘，返回“预览 + 指针”；任何失败都退回原文。"""
+        root = self._offload_root
+        if root is None or not isinstance(content, str):
+            return content
+        if len(content) <= OFFLOAD_THRESHOLD_CHARS or name in OFFLOAD_SKIP_TOOLS:
+            return content
+        if name == "read_file" and str(args.get("path", "")).replace("\\", "/").startswith(
+            ".astercli/offload"
+        ):
+            return content  # 防止“读落盘文件 → 又落盘”的递归
+        directory = root / ".astercli" / "offload"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"{stamp}-{name.replace('.', '_')}-{uuid4().hex[:6]}.txt"
+            path = directory / filename
+            path.write_text(content, encoding="utf-8")
+            display = path.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return content
+        return (
+            f"{content[:OFFLOAD_PREVIEW_CHARS]}\n\n"
+            f"[offload] 完整结果 {len(content)} 字符已存盘: {display}"
+            "（需要时用 read_file 配 offset/limit 分段读取，不要整篇读回）"
+        )
 
     # ---------- LSP 诊断（对齐 Java setLspManager / flushPendingLspDiagnostics） ----------
 
@@ -336,6 +383,7 @@ class ToolRegistry:
                     args_skeleton=args_skeleton(args),
                 )
             )
+        content = self._maybe_offload(name, args, content)
         content = truncate_output(content, self._max_output_chars)
         return ToolMessage(content=content, tool_call_id=call.get("id") or "", name=name)
 

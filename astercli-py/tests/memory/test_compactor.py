@@ -151,6 +151,52 @@ async def test_compact_now_insufficient_rounds_returns_none():
     assert await compactor.compact_now(history) is None
 
 
+# ---------- snip（第 2 层：手动截断） ----------
+
+
+def test_snip_keeps_last_n_rounds_without_llm():
+    history = make_history(5)
+    compactor = ConversationHistoryCompactor()  # 无 client：snip 不调用 LLM
+    rebuilt = compactor.snip(history, keep_rounds=2)
+
+    assert rebuilt is not None
+    # [S, 截断标记, H4, A4, H5, A5]
+    assert len(rebuilt) == 6
+    assert isinstance(rebuilt[0], SystemMessage)
+    assert "已手动截断" in rebuilt[1].content
+    assert rebuilt[2] is history[7]
+    assert rebuilt[-1] is history[10]
+    assert len(history) == 11  # 原历史不被原地修改
+
+
+def test_snip_insufficient_rounds_returns_none():
+    compactor = ConversationHistoryCompactor()
+    assert compactor.snip(make_history(2), keep_rounds=2) is None
+    assert compactor.snip([], keep_rounds=2) is None
+
+
+def test_snip_never_splits_tool_pair():
+    history = [
+        SystemMessage("system"),
+        HumanMessage("第一个任务"),
+        AIMessage("第一轮回答"),
+        HumanMessage("读文件"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "a.md"}, "id": "c1", "type": "tool_call"}],
+        ),
+        ToolMessage(content="文件内容", tool_call_id="c1", name="read_file"),
+        AIMessage("读到了"),
+        HumanMessage("总结一下"),
+        AIMessage("总结"),
+    ]
+    rebuilt = ConversationHistoryCompactor().snip(history, keep_rounds=1)
+    assert rebuilt is not None
+    assert rebuilt[-2] is history[7]
+    assert rebuilt[-1] is history[8]
+    assert not any(isinstance(m, ToolMessage) for m in rebuilt)
+
+
 # ---------- 摘要序列化 ----------
 
 

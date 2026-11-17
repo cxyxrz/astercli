@@ -24,6 +24,7 @@ from langgraph.types import Command, interrupt
 
 from ..config import TOOL_MODE_SLIM
 from ..llm.factory import ProviderRuntime
+from ..memory.projection import project_messages
 from ..memory.tokens import estimate_messages_tokens
 from ..tools.registry import ToolRegistry
 from .budget import AgentBudget, ExitReason
@@ -137,6 +138,9 @@ def make_agent_node(
         # RemoveMessage 会让含同对象的重建尾段错乱；走 REMOVE_ALL_MESSAGES
         # 全量替换通道，reducer 直接返回 right[idx+1:] = rebuilt + 本轮新消息。
         messages = state["messages"]
+        # 第 3、4 层：读时投影（旧工具结果微压缩 + 超预算折叠），
+        # 只影响本次请求的 messages，不改写 state，也不删除消息。
+        messages = project_messages(messages, budget_tokens=trigger_tokens or 0)
         prefix: list = []
         if compactor is not None and trigger_tokens:
             rebuilt = await compactor.compact_if_needed(messages, trigger_tokens)

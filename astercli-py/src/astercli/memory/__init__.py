@@ -1,6 +1,6 @@
 """记忆模块：conversationHistory 压缩 + 长期记忆。"""
 
-from .compactor import ConversationHistoryCompactor
+from .compactor import DEFAULT_SNIP_KEEP_ROUNDS, ConversationHistoryCompactor
 from .long_term import (
     LongTermMemory,
     MemoryEntry,
@@ -18,6 +18,7 @@ from .tokens import (
 )
 
 __all__ = [
+    "DEFAULT_SNIP_KEEP_ROUNDS",
     "ConversationHistoryCompactor",
     "LongTermMemory",
     "MemoryEntry",

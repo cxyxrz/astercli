@@ -45,6 +45,7 @@ from ..llm.factory import (
 from ..lsp import LspManager
 from ..mcp import McpServerManager, expand_mentions
 from ..memory import (
+    DEFAULT_SNIP_KEEP_ROUNDS,
     ConversationHistoryCompactor,
     LongTermMemory,
     auto_compact_trigger_tokens,
@@ -184,6 +185,7 @@ class ReplApp:
             self.root, self.settings, on_diagnostics=self.reflection_collector.lsp_error
         )
         self.registry.set_lsp_manager(self.lsp_manager)
+        self.registry.set_offload_root(self.root)
         # Skill（P7）：三层目录加载 + load_skill 工具 + 注入缓冲区
         self.skill_registry = default_skill_registry(self.root)
         self.skill_buffer = SkillContextBuffer()
@@ -562,6 +564,8 @@ class ReplApp:
             self.renderer.info("已清空会话历史（system prompt 已重建，长期记忆与经验库保留）。")
         elif cmd == "/compact":
             self._compact_history()
+        elif cmd == "/snip":
+            self._snip_history(payload)
         elif cmd == "/plan":
             if payload:
                 self._run(self.run_plan_turn(payload))
@@ -602,7 +606,7 @@ class ReplApp:
             self._handle_dream(payload)
         elif cmd == "/help":
             self.renderer.info(
-                "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · "
+                "命令: /quit /exit 退出 · /clear 清空历史 · /compact 压缩历史 · /snip [N] 截断历史 · "
                 "/model [provider] 切换 · /tools 工具列表 · /plan [任务] 计划模式 · "
                 "/team [任务] 多 Agent 协作 · "
                 "/skill [list|show|off|on|reload] Skill 管理 · "
@@ -629,6 +633,26 @@ class ReplApp:
         self.history[:] = rebuilt
         self.renderer.info(
             f"已压缩会话历史: {before} → {after} tokens（{len(rebuilt)} 条消息，保留最近 1 个 user 轮次）"
+        )
+
+    def _snip_history(self, payload: str) -> None:
+        """手动截断（第 2 层）：零 API 开销，保留最近 N 个 user 轮（默认 2）。"""
+        keep = DEFAULT_SNIP_KEEP_ROUNDS
+        if payload:
+            if not payload.isdigit() or int(payload) < 1:
+                self.renderer.warn("用法: /snip [保留轮数]，例如 /snip 2")
+                return
+            keep = int(payload)
+        rebuilt = self.compactor.snip(self.history, keep_rounds=keep)
+        if rebuilt is None:
+            self.renderer.info(f"当前不超过 {keep} 个 user 轮次，无需截断。")
+            return
+        before = estimate_messages_tokens(self.history)
+        after = estimate_messages_tokens(rebuilt)
+        self.history[:] = rebuilt
+        self.renderer.info(
+            f"已截断会话历史: {before} → {after} tokens"
+            f"（{len(rebuilt)} 条消息，保留最近 {keep} 个 user 轮次，未调用 LLM）"
         )
 
     def _handle_save(self, payload: str) -> None:

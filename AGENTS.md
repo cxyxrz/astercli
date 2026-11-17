@@ -50,7 +50,7 @@ uv run astercli 你的提问  # 一次性运行模式
 uv run pytest            # Python 版测试（549 个）
 ```
 
-Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。P9 起支持 `/experience`，P10 起支持 `/dream [status|log|undo|on|off]`（无参数立即整合）。
+Python 版 P3 起支持 `/compact`（手动压缩会话历史）、`/snip [N]`（零 API 手动截断，保留最近 N 个 user 轮）、`/save`（长期记忆，默认项目级，`--global` 前缀为全局）、`/memory status|list|search|delete|clear`；长期记忆每轮前置注入 user message（与 Java 注入 system prompt 不同，为保持 system prompt 稳定友好 prompt cache）。P9 起支持 `/experience`，P10 起支持 `/dream [status|log|undo|on|off]`（无参数立即整合）。
 
 Python 版 P4 起支持 HITL 审批与计划模式：危险工具执行前经 LangGraph `interrupt()` 挂起（审批选项 y/a/n/s/m，fail-safe 一律保守拒绝），`/plan [任务]` 出 DAG 摘要并进入审阅（Enter 执行 / v 展开 / q 取消 / i 补充重规划），失败且进度 < 0.5 自动 replan；任务按拓扑序顺序执行（与 Java 4 线程并行的已知差异）。工具参数在执行前按 Schema 做浅层校验（required / 基本类型 / enum），命令可选 OS 级沙箱（`ASTERCLI_COMMAND_SANDBOX`，与 Java 同名同语义，fail-closed）。
 

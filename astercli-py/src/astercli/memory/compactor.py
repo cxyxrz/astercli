@@ -43,6 +43,10 @@ SUMMARY_PROMPT = """请把下面的对话历史压缩成简明摘要，保留：
 SUMMARY_SYSTEM = "你是一个对话摘要助手，只输出摘要本身，不输出元描述。"
 SUMMARY_ACK = "好的，我已了解之前的上下文，请继续。"
 
+# 第 2 层 Snip：手动截断，默认保留最近 2 个 user 轮
+DEFAULT_SNIP_KEEP_ROUNDS = 2
+SNIP_MARKER = "[已手动截断 {count} 条较早消息（/snip），需要时请重新说明]"
+
 
 class ConversationHistoryCompactor:
     """history 压缩器。
@@ -77,6 +81,28 @@ class ConversationHistoryCompactor:
     async def compact_now(self, messages: List) -> Optional[List]:
         """手动压缩：跳过阈值判断，仅保留最近 1 个 user 轮次（/compact）。"""
         return await self._compact(messages, retain_rounds=1)
+
+    def snip(self, messages: List, keep_rounds: int = DEFAULT_SNIP_KEEP_ROUNDS) -> Optional[List]:
+        """手动截断（Snip）：不调用 LLM，直接丢弃较早轮次，保留最近 keep_rounds 轮。
+
+        与 compact 的区别：不生成摘要、零 API 开销；与 /clear 的区别：保留尾部原文。
+        """
+        if not messages:
+            return None
+        system_end = 1 if isinstance(messages[0], SystemMessage) else 0
+        user_indices = [
+            i for i in range(system_end, len(messages)) if isinstance(messages[i], HumanMessage)
+        ]
+        keep = max(1, keep_rounds)
+        if len(user_indices) <= keep:
+            return None
+        split = user_indices[-keep]
+        if split <= system_end:
+            return None
+        rebuilt = list(messages[:system_end])
+        rebuilt.append(HumanMessage(SNIP_MARKER.format(count=split - system_end)))
+        rebuilt.extend(messages[split:])
+        return rebuilt
 
     async def _compact(self, messages: List, *, retain_rounds: int) -> Optional[List]:
         if not messages:

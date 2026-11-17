@@ -21,6 +21,7 @@ uv run pytest                            # 全量单测
 
 - `/quit` `/exit` 退出；`/clear` 清空会话历史（长期记忆与经验库保留，审批"全部放行"名单与会话反思配额重置）；`/model` 查看/切换 provider；`/tools` 查看工具列表（`*` 标记需审批）
 - `/compact` 手动压缩当前会话历史（保留最近 1 个轮次，早期轮次摘要为"[已压缩的历史对话摘要]"）
+- `/snip [N]` 手动截断当前会话历史（零 API，保留最近 N 个 user 轮，默认 2）
 - `/save [内容|--global 内容]` 保存长期记忆（默认项目级作用域；`--global` 为跨项目全局）
 - `/memory status|list|search <关键词>|delete <id>|clear` 长期记忆管理
 - `/plan [任务]` 计划模式：无参数时下一条输入进入规划；带参数直接规划该任务
@@ -68,8 +69,13 @@ uv run pytest                            # 全量单测
 
 对齐 Java `ConversationHistoryCompactor` / `LongTermMemory` 语义：
 
-- **自动压缩**：每轮 LLM 调用前评估历史 token，达到 `window - 20k - 13k` 阈值（200k 窗口 ≈ 167k）时把早期轮次摘要成一对 `[已压缩的历史对话摘要]` 消息，通过 LangGraph `RemoveMessage(REMOVE_ALL_MESSAGES)` 全量替换通道重建历史；摘要失败不破坏原历史
-- **手动压缩**：`/compact` 立即压缩，保留最近 1 个轮次
+- **五层压缩金字塔**（由廉价到昂贵，前四层零 API 调用）：
+  1. **大结果存磁盘**：工具输出 > 12k 字符时写入 `<项目根>/.astercli/offload/`，上下文只保留 2k 预览 + 指针，模型需要时自行 `read_file` 分段读取（读取落盘文件不会再次落盘）
+  2. **Snip**：`/snip [N]` 手动截断，直接丢弃旧轮次、保留最近 N 个 user 轮（默认 2），不生成摘要
+  3. **Micro-Compact（时间衰减）**：旧轮次里只读工具（`read_file` / `grep_code` / `web_fetch` 等）的结果替换为占位符；`write_file` / `execute_command` 的副作用记录不动
+  4. **Context Collapse（读时投影）**：投影后仍超预算时先截断旧消息正文（头 800 + 尾 300 字符），再从最旧 user 轮整段省略；只影响本次请求，不改写 state
+  5. **Auto-Compact**：达到 `window - 20k - 13k` 阈值时把早期轮次摘要成 `[已压缩的历史对话摘要]`，通过 `RemoveMessage(REMOVE_ALL_MESSAGES)` 全量替换通道重建历史；摘要失败不破坏原历史
+- 第 3、4 层按 user 消息划分轮次，最近 3 轮永远原样保留，且只替换 `ToolMessage` 的 content，不删除消息，因此不会破坏 `tool_call` / `tool_result` 成对协议
 - **长期记忆**：`/save` 存储到 `~/.astercli-py/memory/long_term_memory.json`（`ASTERCLI_MEMORY_DIR` 可覆盖），scope=project 按项目根过滤、global 全局可见；每轮任务前按关键词命中率 + 24h 时间衰减检索，以"## 相关长期记忆"段落前置注入 user message（Java 版注入 system prompt，Python 版保持 system prompt 稳定以友好 prompt cache）
 
 ## MCP（P5）
