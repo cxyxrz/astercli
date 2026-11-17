@@ -30,6 +30,8 @@ from .skill import Skill, Source
 from .state_store import SkillStateStore
 
 LOAD_SKILL_BODY_MAX_CHARS = 5 * 1024
+# 随包分发的最底层 skill 资产（hatchling 会把包内非 .py 文件一起打进 wheel）
+BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent / "builtin"
 
 __all__ = [
     "Skill",
@@ -44,11 +46,12 @@ __all__ = [
 
 
 def default_skill_registry(project_root: Path) -> SkillRegistry:
-    """构建默认三层注册表（user ~/.astercli-py/skills + project .astercli/skills）。"""
+    """构建默认三层注册表（builtin 包内资产 + user + project，后者覆盖前者同名）。"""
     registry = SkillRegistry(
         user_skills_dir=Path.home() / ".astercli-py" / "skills",
         project_skills_dir=project_root / ".astercli" / "skills",
         state_store=SkillStateStore(),
+        builtin_dir=BUILTIN_SKILLS_DIR if BUILTIN_SKILLS_DIR.is_dir() else None,
     )
     registry.reload()
     return registry

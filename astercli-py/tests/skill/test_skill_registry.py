@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from astercli.skill import SkillRegistry, SkillStateStore
+from astercli.skill import (
+    BUILTIN_SKILLS_DIR,
+    SkillRegistry,
+    SkillStateStore,
+    default_skill_registry,
+)
 from astercli.skill.registry import CONFLICT_SIMILARITY, description_similarity
 from astercli.skill.skill import Source
 
@@ -217,3 +222,38 @@ class TestDescriptionConflicts:
         assert description_similarity("同一条描述", "同一条描述") == 1.0
         assert description_similarity("把 PDF 拆分成单页", "把PDF拆分成单页。") == 1.0
         assert description_similarity("生成项目周报", "把 PDF 拆分成单页") < CONFLICT_SIMILARITY
+
+
+class TestBuiltinSkills:
+    def _registry(self, tmp_path, project_skills=None):
+        project = tmp_path / "project"
+        for name, desc in (project_skills or {}).items():
+            write_skill(project, name, description=desc)
+        registry = SkillRegistry(
+            user_skills_dir=tmp_path / "user",
+            project_skills_dir=project,
+            state_store=SkillStateStore(tmp_path / "state.json"),
+            builtin_dir=BUILTIN_SKILLS_DIR,
+        )
+        registry.reload()
+        return registry
+
+    def test_内置资产随包加载(self, tmp_path):
+        registry = self._registry(tmp_path)
+        names = {s.name for s in registry.all_skills()}
+        assert {"web-research", "codebase-onboarding"} <= names
+        assert all(s.source == Source.BUILTIN for s in registry.all_skills())
+        assert registry.find_any_skill("web-research").references_dir is not None
+
+    def test_项目级同名覆盖内置(self, tmp_path):
+        registry = self._registry(tmp_path, {"web-research": "项目自己的联网调研流程"})
+        skill = registry.find_skill("web-research")
+        assert skill.source == Source.PROJECT
+        assert skill.description == "项目自己的联网调研流程"
+
+    def test_内置描述互不冲突(self, tmp_path):
+        assert self._registry(tmp_path).conflicts() == []
+
+    def test_default_skill_registry_带内置层(self, tmp_path):
+        registry = default_skill_registry(tmp_path)
+        assert registry.find_any_skill("web-research") is not None

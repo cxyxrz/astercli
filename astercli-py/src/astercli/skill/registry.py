@@ -1,7 +1,7 @@
 """Skill 加载与运行时维护（对齐 Java SkillRegistry）。
 
 三层目录扫描顺序（后者整体覆盖前者同名 skill）：
-  1. builtin（Java 为 jar 内置解压；Python 版暂无内置资产，参数保留）
+  1. builtin：包内 ``skill/builtin/<name>/SKILL.md``（web-research / codebase-onboarding）
   2. user：~/.astercli-py/skills/<name>/SKILL.md（与 Java ~/.astercli 隔离）
   3. project：<projectDir>/.astercli/skills/<name>/SKILL.md
 
