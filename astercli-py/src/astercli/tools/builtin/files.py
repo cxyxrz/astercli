@@ -26,6 +26,7 @@ MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024   # 单文件 5MB 上限
 MAX_DIFF_BYTES = 512 * 1024              # 超过该大小的旧文件不生成行内 diff
 MAX_READ_FILE_LINES = 2000
 MAX_GREP_RESULTS = 200
+MAX_GLOB_RESULTS = 200          # glob_files 硬上限：再多就是输出爆炸，应收紧 pattern
 MAX_GLOB_CANDIDATES = 2000
 MAX_GREP_CONTEXT_LINES = 5
 DEFAULT_GREP_HEAD_LIMIT = 20
@@ -65,7 +66,7 @@ def register_file_tools(registry: ToolRegistry, path_guard: PathGuard) -> None:
         create_parameters(
             Param("pattern", "string", "glob 模式，例如 **/*.java、**/*Controller*、README.md", True),
             Param("path", "string", "搜索起始目录，默认 .", False),
-            Param("max_results", "integer", "最多返回结果数，默认 50，上限 200", False),
+            Param("max_results", "integer", "最多返回结果数，默认 50，上限 100", False),
         ),
         _glob_files(path_guard),
     )
@@ -187,7 +188,7 @@ def _glob_files(path_guard: PathGuard):
         if not pattern or not pattern.strip():
             return "文件匹配失败: pattern 不能为空"
         root = path_guard.resolve_safe(args.get("path") or ".")
-        max_results = _clamp(_parse_int(args.get("max_results"), 50), 1, MAX_GREP_RESULTS)
+        max_results = _clamp(_parse_int(args.get("max_results"), 50), 1, MAX_GLOB_RESULTS)
         project_root = path_guard.root_path
 
         pattern_parts = PurePosixPath(_normalize_glob(pattern)).parts
@@ -222,7 +223,7 @@ def _glob_files(path_guard: PathGuard):
 
         header = f"匹配文件 {len(matches)} 个（按修改时间倒序）"
         if partial:
-            header += f"（已达到上限 {max_results}）"
+            header += f"（已达上限 {max_results}，请收紧 pattern 或 path 后重试）"
         out = [header + ":"]
         for i, m in enumerate(matches):
             out.append(f"{i + 1}. {m}")

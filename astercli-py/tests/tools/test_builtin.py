@@ -134,7 +134,17 @@ def test_glob_files_max_results_cap(registry, project):
         (project / f"f{i}.txt").write_text("x", encoding="utf-8")
     out = invoke(registry, "glob_files", {"pattern": "f*.txt", "max_results": 3})
     assert "匹配文件 3 个" in out
-    assert "已达到上限 3" in out
+    assert "已达上限 3" in out
+
+
+def test_glob_files_hard_cap_100(registry, project):
+    """max_results 超过硬上限时按 100 截断，并提示收紧 pattern。"""
+    for i in range(101):
+        (project / f"g{i:03d}.txt").write_text("x", encoding="utf-8")
+    out = invoke(registry, "glob_files", {"pattern": "g*.txt", "max_results": 999})
+    assert "匹配文件 100 个" in out
+    assert "已达上限 100" in out
+    assert "收紧 pattern" in out
 
 
 def test_glob_files_skips_excluded_dirs(registry, project):
