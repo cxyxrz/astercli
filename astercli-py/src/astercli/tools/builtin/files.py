@@ -26,6 +26,7 @@ MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024   # 单文件 5MB 上限
 MAX_DIFF_BYTES = 512 * 1024              # 超过该大小的旧文件不生成行内 diff
 MAX_READ_FILE_LINES = 2000
 MAX_GREP_RESULTS = 200
+MAX_GLOB_CANDIDATES = 2000
 MAX_GREP_CONTEXT_LINES = 5
 DEFAULT_GREP_HEAD_LIMIT = 20
 DEFAULT_GREP_MAX_CHARS = 24_000
@@ -34,7 +35,7 @@ DEFAULT_GREP_MAX_CHARS = 24_000
 def register_file_tools(registry: ToolRegistry, path_guard: PathGuard) -> None:
     registry.register(
         "read_file",
-        "读取文件内容（仅限项目根目录之内）；可用 offset/limit 按行读取，避免把大文件整段塞进上下文",
+        "读取文件内容（仅限项目根目录之内）；可用 offset/limit 按行读取，默认从文件开头读取，最多读 2000 行，如果你已经知道需要文件的哪一部分，就只读那一部分。对大文件来说，这一点特别重要。",
         create_parameters(
             Param("path", "string", "文件路径", True),
             Param("offset", "integer", "起始行号，1 表示第一行；省略时读取全文", False),
@@ -60,7 +61,7 @@ def register_file_tools(registry: ToolRegistry, path_guard: PathGuard) -> None:
     )
     registry.register(
         "glob_files",
-        "按文件名 glob 查找项目内文件（只读、实时、尊重常见忽略目录）；适合先定位候选文件，例如 **/*Service.java",
+        "按文件名 glob 查找项目内文件（只读、实时、尊重常见忽略目录，结果按修改时间倒序，最近改过的排在前面）；适合先定位候选文件，例如 **/*Service.java",
         create_parameters(
             Param("pattern", "string", "glob 模式，例如 **/*.java、**/*Controller*、README.md", True),
             Param("path", "string", "搜索起始目录，默认 .", False),
@@ -192,22 +193,34 @@ def _glob_files(path_guard: PathGuard):
         pattern_parts = PurePosixPath(_normalize_glob(pattern)).parts
         file_name_pattern = PurePosixPath(_normalize_glob(pattern)).name
 
-        matches: list = []
-        partial = False
+        # 先收齐候选再排序：边扫边截断只能拿到目录遍历顺序的前 N 个，
+        # 最近修改的文件可能被漏掉。
+        candidates: list = []
+        capped = False
         for path in _walk_files(root):
             rel = path.relative_to(project_root)
             rel_parts = tuple(rel.parts)
             if _glob_match(pattern_parts, rel_parts) or fnmatch.fnmatchcase(
                 path.name, file_name_pattern
             ):
-                matches.append(rel.as_posix())
-                if len(matches) >= max_results:
-                    partial = True
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0   # 坏符号链接等：当作最旧，不中断遍历
+                candidates.append((mtime, rel.as_posix()))
+                if len(candidates) >= MAX_GLOB_CANDIDATES:
+                    capped = True
                     break
 
-        if not matches:
+        if not candidates:
             return f"未找到匹配文件: {pattern}"
-        header = f"匹配文件 {len(matches)} 个"
+
+        # 最近修改优先；mtime 相同时按路径字典序，保证结果稳定
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        matches = [rel for _, rel in candidates[:max_results]]
+        partial = capped or len(candidates) > max_results
+
+        header = f"匹配文件 {len(matches)} 个（按修改时间倒序）"
         if partial:
             header += f"（已达到上限 {max_results}）"
         out = [header + ":"]

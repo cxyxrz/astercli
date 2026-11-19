@@ -144,6 +144,27 @@ def test_glob_files_skips_excluded_dirs(registry, project):
     assert "skip.js" not in out
 
 
+def test_glob_files_sorted_by_mtime_and_truncated(registry, project):
+    """最近修改的文件排在最前；max_results 截断的是排序后的尾部而非遍历顺序。"""
+    import os
+
+    for name, ts in (
+        ("old.txt", 1_600_000_000),
+        ("mid.txt", 1_650_000_000),
+        ("new.txt", 1_700_000_000),
+    ):
+        path = project / name
+        path.write_text("x", encoding="utf-8")
+        os.utime(path, (ts, ts))
+
+    out = invoke(registry, "glob_files", {"pattern": "*.txt", "max_results": 2})
+    assert "按修改时间倒序" in out
+    assert "new.txt" in out
+    assert "mid.txt" in out
+    assert "old.txt" not in out
+    assert out.index("new.txt") < out.index("mid.txt")
+
+
 # ---------- grep_code ----------
 
 
