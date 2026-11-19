@@ -113,12 +113,19 @@ class TestExploreDispatch:
         assert readonly_command_reason("grep -n foo src") == ""
         assert readonly_command_reason("git status") == ""
         assert readonly_command_reason("git log --oneline -5") == ""
+        assert readonly_command_reason("git branch -a") == ""
+        assert readonly_command_reason("git remote -v") == ""
         assert "白名单" in readonly_command_reason("rm -rf /")
         assert "白名单" in readonly_command_reason("python x.py")
         assert "只读子命令" in readonly_command_reason("git push")
+        assert "只读查询选项" in readonly_command_reason("git branch -D feature")
+        assert "只读查询选项" in readonly_command_reason("git branch new-branch")
+        assert "远端配置" in readonly_command_reason("git remote add origin x")
         assert "管道" in readonly_command_reason("cat a | grep b")
         assert "管道" in readonly_command_reason("cat a > b")
         assert "参数" in readonly_command_reason("find . -delete")
+        assert "参数" in readonly_command_reason("find . -fprint out.txt")
+        assert "参数" in readonly_command_reason("rg --pre cat foo")
 
     async def test_注册工具可被主_agent_调用(self):
         client = _FakeClient([AIMessage(content="主结论")])

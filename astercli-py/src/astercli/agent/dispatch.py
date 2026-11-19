@@ -19,7 +19,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -55,8 +55,16 @@ GIT_READONLY_SUBCOMMANDS = {
 # 即使命令在白名单里，这些参数也可能写盘或执行子进程
 _MUTATING_FLAGS = {
     "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprint0", "-fls",
     "--in-place", "--output", "--output-document",
+    "--pre", "--pre-glob",
 }
+# branch / remote 默认带位置参数就会改仓库，只放行纯查询选项
+_GIT_BRANCH_FLAGS = {
+    "-a", "-r", "-v", "-vv", "--list", "--all", "--remotes", "--show-current",
+    "--contains", "--merged", "--no-merged", "--points-at", "--format",
+}
+_GIT_REMOTE_FLAGS = {"-v", "--verbose", "show", "get-url"}
 _SHELL_METACHARS = set(";|&<>`$()\n\r\\")
 
 
@@ -80,6 +88,14 @@ def readonly_command_reason(command: str) -> str:
         sub = argv[1] if len(argv) > 1 else ""
         if sub not in GIT_READONLY_SUBCOMMANDS:
             return f"git {sub or '(无子命令)'} 不在只读子命令白名单内"
+        if sub == "branch":
+            for token in argv[2:]:
+                if token not in _GIT_BRANCH_FLAGS and not token.startswith("--format="):
+                    return f"git branch {token} 不是只读查询选项"
+        if sub == "remote":
+            for token in argv[2:]:
+                if token not in _GIT_REMOTE_FLAGS:
+                    return f"git remote {token} 可能修改远端配置"
     for token in argv[1:]:
         bare = token.split("=", 1)[0]
         if bare in _MUTATING_FLAGS:
