@@ -23,6 +23,7 @@ from rich.console import Console
 
 from .. import __version__
 from ..agent import AgentBudget
+from ..agent.dispatch import register_dispatch_tool
 from ..agent.graph import ainvoke_with_hitl, build_react_graph, make_checkpointer
 from ..agent.orchestrator import AgentOrchestrator
 from ..agent.plan_execute import PlanExecuteAgent
@@ -193,6 +194,11 @@ class ReplApp:
         # Skill 子 agent 隔离：大 skill 任务 fork 到一次性上下文，主对话只收结论
         register_skill_fork_tool(
             self.registry, self.skill_registry, runtime, self.settings, renderer=renderer
+        )
+        # Explore 子 agent 派遣（Claude Code 式 Agent 工具）：只读工具池 +
+        # 独立上下文多轮迭代，主上下文只收结论
+        register_dispatch_tool(
+            self.registry, runtime, self.settings, self.root, renderer=renderer
         )
         # MCP（P5）：动态工具注册进同一 registry（后台续载的工具实时进 schemas()）；
         # startup 同步最多等 8 秒，超时部分后台续载，不阻塞首屏（对齐 Java）

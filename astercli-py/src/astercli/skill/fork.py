@@ -29,8 +29,11 @@ FORK_TOOL_NAME = "run_skill_task"
 MAX_FORK_STEPS = 8
 MAX_FORK_ANSWER_CHARS = 4000
 FORK_TIMEOUT_SECONDS = 600
-# load_skill 会写主 buffer；read_skill_file 要按 skill 重新绑定；其余见模块注释
-_CHILD_EXCLUDED_TOOLS = {FORK_TOOL_NAME, "load_skill", "read_skill_file", "revert_turn"}
+# load_skill 会写主 buffer；read_skill_file 要按 skill 重新绑定；
+# dispatch_agent 不允许再嵌套派遣（与 Explore 子 agent 的排除集对称）
+_CHILD_EXCLUDED_TOOLS = {
+    FORK_TOOL_NAME, "load_skill", "read_skill_file", "revert_turn", "dispatch_agent",
+}
 
 
 class SkillForkRunner:

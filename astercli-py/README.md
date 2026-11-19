@@ -121,6 +121,7 @@ uv run pytest                            # 全量单测
 - **load_skill 工具**：LLM 按索引段触发场景调用，body 经 `SkillContextBuffer`（LRU≤3）前置注入下一轮 user message（`## 已加载 Skill：<name>` 段）；注入段头部带 `skill_dir` 与附属文件清单；`/clear` 清空 buffer
 - **read_skill_file 工具**：按需分页读取该 skill 目录内 `references/` 等附属文件（渐进披露第三层）。以 skill 目录为根的 PathGuard 围栏，补 `read_file` 只认项目根、读不到 `~/.astercli-py/skills/` 的缺口；body 超 5KB 时 `load_skill` 会按行截断并给出续读 `offset`
 - **run_skill_task 工具（子 agent 隔离）**：把 skill 任务 fork 到一次性子上下文——完整正文与全部中间步骤都不进主对话，主上下文只收到一条结论。子 agent 只复制父 registry 的**只读**工具（危险工具、`load_skill`、自身均不复制），`read_skill_file` 重绑为仅限该 skill；最多 8 步、超时 600s、结论截断 4000 字符
+- **dispatch_agent 工具（Explore 子 agent）**：Claude Code 式派遣。子 agent 是独立运行实例——全新 system + 单条 prompt，不带主对话历史；只拿只读工具池（`read_file` / `list_dir` / `glob_files` / `grep_code` / `search_code` / `web_*` + 只读命令 `run_readonly_command`），不能写文件、不能派子 agent（`dispatch_agent` 自身与 `load_skill` / `run_skill_task` 都不复制）；在自己上下文里最多 12 步多轮搜索，主上下文只收一条结论（截断 6000 字符，带步数与工具名）；`run_readonly_command` 用命令白名单 + 禁止管道/重定向/串联 + `git` 只读子命令，规避无审批通道的写风险
 - **描述冲突检测**：启用 skill 两两比较归一化 description（字符二元组预筛 + `SequenceMatcher`，阈值 0.75），命中时在启动 banner、`/skill list`、`/skill reload` 给 warning，提示模型可能随机选一个
 - **启用状态**：`~/.astercli-py/skills.json` 持久化 disabled 列表
 
